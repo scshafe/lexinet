@@ -1,0 +1,6 @@
+.trial-phases.json
+/.go
+/.go-cache
+/.gomodcache
+/.gotmp
+/lexinet
