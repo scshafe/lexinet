@@ -1,0 +1,2 @@
+-- Intentionally no-op: extensions may be shared by future migrations or other
+-- application objects in the database.
