@@ -1,0 +1,86 @@
+{
+  "architecture": {
+    "slug": "lexinet-current-architecture",
+    "title": "lexinet current architecture",
+    "status": "active",
+    "intent": "current",
+    "graphKind": "system",
+    "description": "Single-binary lexinet deployment: agent-friendly CLI and HTTP service backed by an idea-centric Postgres model, relationship graph, and search index."
+  },
+  "nodes": [
+    {
+      "nodeKey": "agent-cli",
+      "title": "Agent CLI",
+      "label": "Agent CLI",
+      "kind": "agent",
+      "status": "active",
+      "description": "Cobra JSON-first CLI used by agents and operators for idea/name/body/link/traverse/search workflows."
+    },
+    {
+      "nodeKey": "http-service",
+      "title": "HTTP service :17892",
+      "label": "HTTP service :17892",
+      "kind": "service",
+      "status": "active",
+      "description": "chi HTTP API served by the same lexinet binary on port 17892; health/version are public and mutations are bearer-protected when configured."
+    },
+    {
+      "nodeKey": "postgres",
+      "title": "Postgres lexinet DB",
+      "label": "Postgres lexinet DB",
+      "kind": "database",
+      "status": "active",
+      "description": "Postgres database with embedded migrations, pgx access, pgcrypto/citext/pg_trgm extensions, and application tables."
+    },
+    {
+      "nodeKey": "idea-name-body-model",
+      "title": "Idea/name/body model",
+      "label": "Idea/name/body model",
+      "kind": "custom",
+      "status": "active",
+      "description": "Idea-centric schema: one concept has many names plus definitions, examples, and notes."
+    },
+    {
+      "nodeKey": "relationship-graph",
+      "title": "Relationship graph",
+      "label": "Relationship graph",
+      "kind": "custom",
+      "status": "active",
+      "description": "Typed directed idea relationships with reverse labels, symmetric canonicalization, and bounded traversal."
+    },
+    {
+      "nodeKey": "search-index",
+      "title": "Search index",
+      "label": "Search index",
+      "kind": "custom",
+      "status": "active",
+      "description": "Search documents and indexes for exact, prefix, full-text, and opt-in trigram fuzzy search across names and body text."
+    }
+  ],
+  "edges": [
+    {
+      "edgeKey": "postgres-contains-model",
+      "fromNodeKey": "postgres",
+      "toNodeKey": "idea-name-body-model",
+      "kind": "contains",
+      "flavor": "storage",
+      "label": "ideas, names, bodies"
+    },
+    {
+      "edgeKey": "postgres-contains-relationships",
+      "fromNodeKey": "postgres",
+      "toNodeKey": "relationship-graph",
+      "kind": "contains",
+      "flavor": "storage",
+      "label": "relationships"
+    },
+    {
+      "edgeKey": "postgres-contains-search",
+      "fromNodeKey": "postgres",
+      "toNodeKey": "search-index",
+      "kind": "contains",
+      "flavor": "storage",
+      "label": "search_doc + indexes"
+    }
+  ]
+}

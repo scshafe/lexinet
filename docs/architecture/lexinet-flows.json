@@ -1,0 +1,37 @@
+[
+  {
+    "edgeKey": "agent-cli-to-http-service",
+    "fromNodeKey": "agent-cli",
+    "toNodeKey": "http-service",
+    "flavor": "sends",
+    "label": "JSON CLI/client requests"
+  },
+  {
+    "edgeKey": "http-service-to-postgres",
+    "fromNodeKey": "http-service",
+    "toNodeKey": "postgres",
+    "flavor": "reads",
+    "label": "pgx reads and writes"
+  },
+  {
+    "edgeKey": "http-service-to-model",
+    "fromNodeKey": "http-service",
+    "toNodeKey": "idea-name-body-model",
+    "flavor": "writes",
+    "label": "idea/name/body CRUD"
+  },
+  {
+    "edgeKey": "http-service-to-relationship-graph",
+    "fromNodeKey": "http-service",
+    "toNodeKey": "relationship-graph",
+    "flavor": "reads",
+    "label": "link list/traverse"
+  },
+  {
+    "edgeKey": "http-service-to-search-index",
+    "fromNodeKey": "http-service",
+    "toNodeKey": "search-index",
+    "flavor": "reads",
+    "label": "exact/FTS/fuzzy search"
+  }
+]
