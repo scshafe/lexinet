@@ -58,3 +58,13 @@ type CreateNameInput struct {
 	DeprecationNote *string  `json:"deprecation_note,omitempty"`
 	SortKey         float64  `json:"sort_key,omitempty"`
 }
+
+type UpdateNameInput struct {
+	Text            *string   `json:"text,omitempty"`
+	Display         **string  `json:"display,omitempty"`
+	Kind            *NameKind `json:"kind,omitempty"`
+	Expansion       **string  `json:"expansion,omitempty"`
+	LangTag         **string  `json:"lang_tag,omitempty"`
+	DeprecationNote **string  `json:"deprecation_note,omitempty"`
+	SortKey         *float64  `json:"sort_key,omitempty"`
+}

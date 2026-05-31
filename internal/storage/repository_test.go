@@ -1,10 +1,15 @@
 package storage
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"lexinet/internal/model"
 )
@@ -70,4 +75,152 @@ func TestChooseCanonicalName(t *testing.T) {
 	if got := chooseCanonicalName([]model.CreateNameInput{{Text: "first"}, {Text: "second"}}); got != 0 {
 		t.Fatalf("expected fallback canonical at index 0, got %d", got)
 	}
+}
+
+func TestNormalizeNameInputClearsKindSpecificFields(t *testing.T) {
+	expansion := "Representational State Transfer"
+	langTag := "en"
+	deprecationNote := "use REST instead"
+	input := model.CreateNameInput{
+		Text:            "REST",
+		Kind:            model.NameKindAlias,
+		Expansion:       &expansion,
+		LangTag:         &langTag,
+		DeprecationNote: &deprecationNote,
+	}
+	normalizeNameInput(&input)
+	if input.Expansion != nil || input.LangTag != nil || input.DeprecationNote != nil {
+		t.Fatalf("expected alias to clear kind-specific fields, got %#v", input)
+	}
+}
+
+func TestResolveIdeaIDDedupesNameAndSlugCandidates(t *testing.T) {
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runner := &fakeRunner{
+		nameIDs: []uuid.UUID{id},
+		slugIDs: []uuid.UUID{id},
+		ideas: map[uuid.UUID]fakeIdeaState{
+			id: {status: string(model.IdeaStatusActive)},
+		},
+	}
+
+	got, err := resolveIdeaID(context.Background(), runner, "rest")
+	if err != nil {
+		t.Fatalf("expected ref to resolve, got %v", err)
+	}
+	if got != id {
+		t.Fatalf("expected %s, got %s", id, got)
+	}
+}
+
+func TestResolveIdeaIDDetectsNameSlugAmbiguity(t *testing.T) {
+	nameID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	slugID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	runner := &fakeRunner{nameIDs: []uuid.UUID{nameID}, slugIDs: []uuid.UUID{slugID}}
+
+	_, err := resolveIdeaID(context.Background(), runner, "shared-ref")
+	if !errors.Is(err, ErrIdeaRefAmbiguous) {
+		t.Fatalf("expected ambiguous ref, got %v", err)
+	}
+}
+
+func TestResolveIdeaIDFollowsMergedIdeas(t *testing.T) {
+	mergedID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	survivorID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	runner := &fakeRunner{
+		nameIDs: []uuid.UUID{mergedID},
+		ideas: map[uuid.UUID]fakeIdeaState{
+			mergedID:   {status: string(model.IdeaStatusMerged), mergedInto: survivorID},
+			survivorID: {status: string(model.IdeaStatusActive)},
+		},
+	}
+
+	got, err := resolveIdeaID(context.Background(), runner, "old-name")
+	if err != nil {
+		t.Fatalf("expected merged ref to resolve, got %v", err)
+	}
+	if got != survivorID {
+		t.Fatalf("expected survivor %s, got %s", survivorID, got)
+	}
+}
+
+type fakeRunner struct {
+	prefixIDs []uuid.UUID
+	nameIDs   []uuid.UUID
+	slugIDs   []uuid.UUID
+	ideas     map[uuid.UUID]fakeIdeaState
+}
+
+type fakeIdeaState struct {
+	status     string
+	mergedInto uuid.UUID
+}
+
+func (r *fakeRunner) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (r *fakeRunner) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	switch {
+	case strings.Contains(sql, "left(lower(id::text)"):
+		return &fakeUUIDRows{ids: r.prefixIDs}, nil
+	case strings.Contains(sql, "FROM names"):
+		return &fakeUUIDRows{ids: r.nameIDs}, nil
+	case strings.Contains(sql, "WHERE slug"):
+		return &fakeUUIDRows{ids: r.slugIDs}, nil
+	default:
+		return &fakeUUIDRows{}, nil
+	}
+}
+
+func (r *fakeRunner) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	id, _ := args[0].(uuid.UUID)
+	state, ok := r.ideas[id]
+	if !ok {
+		return fakeIdeaRow{err: pgx.ErrNoRows}
+	}
+	return fakeIdeaRow{state: state}
+}
+
+type fakeUUIDRows struct {
+	ids []uuid.UUID
+	i   int
+	err error
+}
+
+func (r *fakeUUIDRows) Close()                                       {}
+func (r *fakeUUIDRows) Err() error                                   { return r.err }
+func (r *fakeUUIDRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *fakeUUIDRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *fakeUUIDRows) Values() ([]any, error)                       { return []any{r.ids[r.i-1]}, nil }
+func (r *fakeUUIDRows) RawValues() [][]byte                          { return nil }
+func (r *fakeUUIDRows) Conn() *pgx.Conn                              { return nil }
+func (r *fakeUUIDRows) Next() bool {
+	if r.i >= len(r.ids) {
+		return false
+	}
+	r.i++
+	return true
+}
+func (r *fakeUUIDRows) Scan(dest ...any) error {
+	*(dest[0].(*uuid.UUID)) = r.ids[r.i-1]
+	return nil
+}
+
+type fakeIdeaRow struct {
+	state fakeIdeaState
+	err   error
+}
+
+func (r fakeIdeaRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	*(dest[0].(*string)) = r.state.status
+	mergedInto := dest[1].(*pgtype.UUID)
+	if r.state.mergedInto != uuid.Nil {
+		mergedInto.Bytes = r.state.mergedInto
+		mergedInto.Valid = true
+	}
+	return nil
 }

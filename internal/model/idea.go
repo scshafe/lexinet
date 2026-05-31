@@ -51,3 +51,10 @@ type CreateIdeaInput struct {
 	Domain  *string           `json:"domain,omitempty"`
 	Names   []CreateNameInput `json:"names"`
 }
+
+type UpdateIdeaInput struct {
+	Slug    **string    `json:"slug,omitempty"`
+	Summary **string    `json:"summary,omitempty"`
+	Domain  **string    `json:"domain,omitempty"`
+	Status  *IdeaStatus `json:"status,omitempty"`
+}
