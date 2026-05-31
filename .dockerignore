@@ -1,0 +1,7 @@
+.git
+.go
+.go-cache
+.gomodcache
+.gotmp
+lexinet
+deploy/docker/pgdata

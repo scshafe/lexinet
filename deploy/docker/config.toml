@@ -1,0 +1,22 @@
+[server]
+url = "http://127.0.0.1:17892"
+token = ""
+token_file = ""
+
+[search]
+fuzzy = false
+default_limit = 20
+
+[display]
+color = "auto"
+id_length = 12
+
+[service]
+listen_loopback = "0.0.0.0:17892"
+auth_token = ""
+tailnet_enabled = false
+tailnet_hostname = "lexinet"
+tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.database]
+dsn = "postgres://lexinet:lexinet@postgres:5432/lexinet?sslmode=disable"
