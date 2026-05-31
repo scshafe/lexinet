@@ -143,6 +143,7 @@ func newServeCommand(opts *Options) *cobra.Command {
 				Version:         opts.Version,
 				ListenLoopback:  cfg.Service.ListenLoopback,
 				AuthToken:       cfg.Service.AuthToken,
+				DatabaseDSN:     cfg.Service.Database.DSN,
 				TailnetEnabled:  cfg.Service.TailnetEnabled,
 				TailnetHostname: cfg.Service.TailnetHostname,
 				TailnetStateDir: cfg.Service.TailnetStateDir,

@@ -46,10 +46,13 @@ type Idea struct {
 }
 
 type CreateIdeaInput struct {
-	Slug    *string           `json:"slug,omitempty"`
-	Summary *string           `json:"summary,omitempty"`
-	Domain  *string           `json:"domain,omitempty"`
-	Names   []CreateNameInput `json:"names"`
+	Slug        *string                 `json:"slug,omitempty"`
+	Summary     *string                 `json:"summary,omitempty"`
+	Domain      *string                 `json:"domain,omitempty"`
+	Names       []CreateNameInput       `json:"names"`
+	Definitions []CreateDefinitionInput `json:"definitions,omitempty"`
+	Examples    []CreateExampleInput    `json:"examples,omitempty"`
+	Notes       []CreateNoteInput       `json:"notes,omitempty"`
 }
 
 type UpdateIdeaInput struct {
@@ -57,4 +60,29 @@ type UpdateIdeaInput struct {
 	Summary **string    `json:"summary,omitempty"`
 	Domain  **string    `json:"domain,omitempty"`
 	Status  *IdeaStatus `json:"status,omitempty"`
+}
+
+type IdeaListInput struct {
+	Limit  int
+	Offset int
+	Query  string
+	Slug   string
+}
+
+type IdeaSummary struct {
+	ID            uuid.UUID  `json:"id"`
+	Slug          *string    `json:"slug,omitempty"`
+	Summary       *string    `json:"summary,omitempty"`
+	Domain        *string    `json:"domain,omitempty"`
+	Status        IdeaStatus `json:"status"`
+	CanonicalName *string    `json:"canonical_name,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type IdeaListResponse struct {
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+	Ideas  []IdeaSummary `json:"ideas"`
 }

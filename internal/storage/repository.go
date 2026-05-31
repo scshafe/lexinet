@@ -121,10 +121,86 @@ func (r *Repository) CreateIdea(ctx context.Context, input model.CreateIdeaInput
 	if err != nil {
 		return nil, err
 	}
+	for _, input := range input.Definitions {
+		if strings.TrimSpace(input.Body) == "" {
+			return nil, fmt.Errorf("create definition: body is required")
+		}
+		if _, err := insertDefinition(ctx, tx, idea.ID, input); err != nil {
+			return nil, err
+		}
+	}
+	for _, input := range input.Examples {
+		if strings.TrimSpace(input.Body) == "" {
+			return nil, fmt.Errorf("create example: body is required")
+		}
+		if _, err := insertExample(ctx, tx, idea.ID, input); err != nil {
+			return nil, err
+		}
+	}
+	for _, input := range input.Notes {
+		if strings.TrimSpace(input.Body) == "" {
+			return nil, fmt.Errorf("create note: body is required")
+		}
+		if _, err := insertNote(ctx, tx, idea.ID, input); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return idea, nil
+}
+
+func (r *Repository) ListIdeas(ctx context.Context, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+	if input.Limit <= 0 {
+		input.Limit = 20
+	}
+	if input.Limit > 100 {
+		input.Limit = 100
+	}
+	if input.Offset < 0 {
+		input.Offset = 0
+	}
+	query := strings.TrimSpace(input.Query)
+	slug := strings.TrimSpace(input.Slug)
+	rows, err := r.db.Query(ctx, `
+		WITH filtered AS (
+			SELECT i.id, i.slug, i.summary, i.domain, i.status, i.created_at, i.updated_at, cn.text::text AS canonical_name
+			FROM ideas i
+			LEFT JOIN names cn ON cn.id = i.canonical_name_id
+			WHERE ($1 = '' OR i.slug = $1)
+			  AND ($2 = '' OR i.summary ILIKE '%' || $2 || '%' OR i.domain ILIKE '%' || $2 || '%' OR cn.text::text ILIKE '%' || $2 || '%')
+		)
+		SELECT count(*) OVER(), id, slug, summary, domain, status, canonical_name, created_at, updated_at
+		FROM filtered
+		ORDER BY coalesce(canonical_name, ''), created_at, id
+		LIMIT $3 OFFSET $4`, slug, query, input.Limit, input.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	response := &model.IdeaListResponse{Limit: input.Limit, Offset: input.Offset, Ideas: make([]model.IdeaSummary, 0)}
+	for rows.Next() {
+		var total int64
+		var idea model.IdeaSummary
+		var slug, summary, domain, canonicalName pgtype.Text
+		var status string
+		if err := rows.Scan(&total, &idea.ID, &slug, &summary, &domain, &status, &canonicalName, &idea.CreatedAt, &idea.UpdatedAt); err != nil {
+			return nil, err
+		}
+		response.Total = int(total)
+		idea.Slug = textPtr(slug)
+		idea.Summary = textPtr(summary)
+		idea.Domain = textPtr(domain)
+		idea.Status = model.IdeaStatus(status)
+		idea.CanonicalName = textPtr(canonicalName)
+		response.Ideas = append(response.Ideas, idea)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return response, nil
 }
 
 func (r *Repository) UpdateIdea(ctx context.Context, ref string, input model.UpdateIdeaInput) (*model.Idea, error) {
@@ -513,11 +589,7 @@ func (r *Repository) CreateDefinition(ctx context.Context, ideaRef string, input
 	if err != nil {
 		return nil, err
 	}
-	definition, err := scanDefinition(tx.QueryRow(ctx, `
-		INSERT INTO definitions (idea_id, body, register, source, is_primary, sort_key)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, idea_id, body, register, source, is_primary, sort_key, created_at, updated_at`,
-		ideaID, strings.TrimSpace(input.Body), input.Register, input.Source, input.IsPrimary, input.SortKey))
+	definition, err := insertDefinition(ctx, tx, ideaID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -629,11 +701,7 @@ func (r *Repository) CreateExample(ctx context.Context, ideaRef string, input mo
 	if err != nil {
 		return nil, err
 	}
-	example, err := scanExample(tx.QueryRow(ctx, `
-		INSERT INTO examples (idea_id, body, lang, caption, sort_key)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, idea_id, body, lang, caption, sort_key, created_at, updated_at`,
-		ideaID, strings.TrimSpace(input.Body), input.Lang, input.Caption, input.SortKey))
+	example, err := insertExample(ctx, tx, ideaID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -741,11 +809,7 @@ func (r *Repository) CreateNote(ctx context.Context, ideaRef string, input model
 	if err != nil {
 		return nil, err
 	}
-	note, err := scanNote(tx.QueryRow(ctx, `
-		INSERT INTO notes (idea_id, body, kind, sort_key)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, idea_id, body, kind, sort_key, created_at, updated_at`,
-		ideaID, strings.TrimSpace(input.Body), input.Kind, input.SortKey))
+	note, err := insertNote(ctx, tx, ideaID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -889,6 +953,30 @@ func insertName(ctx context.Context, q dbRunner, ideaID uuid.UUID, input model.C
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at`,
 		ideaID, input.Text, input.Display, input.Kind, input.Expansion, input.LangTag, input.DeprecationNote, input.SortKey))
+}
+
+func insertDefinition(ctx context.Context, q dbRunner, ideaID uuid.UUID, input model.CreateDefinitionInput) (*model.Definition, error) {
+	return scanDefinition(q.QueryRow(ctx, `
+		INSERT INTO definitions (idea_id, body, register, source, is_primary, sort_key)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, idea_id, body, register, source, is_primary, sort_key, created_at, updated_at`,
+		ideaID, strings.TrimSpace(input.Body), input.Register, input.Source, input.IsPrimary, input.SortKey))
+}
+
+func insertExample(ctx context.Context, q dbRunner, ideaID uuid.UUID, input model.CreateExampleInput) (*model.Example, error) {
+	return scanExample(q.QueryRow(ctx, `
+		INSERT INTO examples (idea_id, body, lang, caption, sort_key)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, idea_id, body, lang, caption, sort_key, created_at, updated_at`,
+		ideaID, strings.TrimSpace(input.Body), input.Lang, input.Caption, input.SortKey))
+}
+
+func insertNote(ctx context.Context, q dbRunner, ideaID uuid.UUID, input model.CreateNoteInput) (*model.Note, error) {
+	return scanNote(q.QueryRow(ctx, `
+		INSERT INTO notes (idea_id, body, kind, sort_key)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, idea_id, body, kind, sort_key, created_at, updated_at`,
+		ideaID, strings.TrimSpace(input.Body), input.Kind, input.SortKey))
 }
 
 func resolveIdeaID(ctx context.Context, q dbRunner, ref string) (uuid.UUID, error) {

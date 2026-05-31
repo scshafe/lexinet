@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"lexinet/internal/storage"
 	"lexinet/internal/tailnet"
 )
 
@@ -20,6 +23,7 @@ type Config struct {
 	Version         string
 	ListenLoopback  string
 	AuthToken       string
+	DatabaseDSN     string
 	TailnetEnabled  bool
 	TailnetHostname string
 	TailnetStateDir string
@@ -30,11 +34,12 @@ type ErrorEnvelope struct {
 }
 
 type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string   `json:"code"`
+	Message    string   `json:"message"`
+	Candidates []string `json:"candidates,omitempty"`
 }
 
-func Router(cfg Config) http.Handler {
+func Router(cfg Config, store Store) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -45,6 +50,7 @@ func Router(cfg Config) http.Handler {
 
 	r.Group(func(r chi.Router) {
 		r.Use(requireBearer(cfg.AuthToken))
+		registerAPIRoutes(r, store)
 		r.Get("/api/v1/ping", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		})
@@ -63,7 +69,17 @@ func Serve(ctx context.Context, cfg Config) error {
 	if cfg.ListenLoopback == "" {
 		cfg.ListenLoopback = "127.0.0.1:17892"
 	}
-	handler := Router(cfg)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseDSN)
+	if err != nil {
+		return err
+	}
+	poolCfg.ConnConfig.RuntimeParams["application_name"] = "lexinet"
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	handler := Router(cfg, storage.NewRepository(pool))
 	loopback := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	loopbackLn, err := net.Listen("tcp", cfg.ListenLoopback)
 	if err != nil {
@@ -142,7 +158,10 @@ func requireBearer(token string) func(http.Handler) http.Handler {
 		expected := "Bearer " + token
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			actual := r.Header.Get("Authorization")
-			if subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) != 1 {
+			actualHash := sha256.Sum256([]byte(actual))
+			expectedHash := sha256.Sum256([]byte(expected))
+			matches := subtle.ConstantTimeCompare(actualHash[:], expectedHash[:]) == 1 && subtle.ConstantTimeEq(int32(len(actual)), int32(len(expected))) == 1
+			if !matches {
 				writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid bearer token")
 				return
 			}
