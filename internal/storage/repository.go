@@ -18,15 +18,16 @@ import (
 )
 
 var (
-	ErrIdeaNotFound       = errors.New("idea not found")
-	ErrIdeaRefAmbiguous   = errors.New("idea reference ambiguous")
-	ErrInvalidIdeaRef     = errors.New("invalid idea reference")
-	ErrInvalidNameKind    = errors.New("invalid name kind")
-	ErrNameNotFound       = errors.New("name not found")
-	ErrCanonicalName      = errors.New("canonical name must be promoted or replaced first")
-	ErrDefinitionNotFound = errors.New("definition not found")
-	ErrExampleNotFound    = errors.New("example not found")
-	ErrNoteNotFound       = errors.New("note not found")
+	ErrIdeaNotFound         = errors.New("idea not found")
+	ErrIdeaRefAmbiguous     = errors.New("idea reference ambiguous")
+	ErrInvalidIdeaRef       = errors.New("invalid idea reference")
+	ErrInvalidNameKind      = errors.New("invalid name kind")
+	ErrNameNotFound         = errors.New("name not found")
+	ErrCanonicalName        = errors.New("canonical name must be promoted or replaced first")
+	ErrDefinitionNotFound   = errors.New("definition not found")
+	ErrExampleNotFound      = errors.New("example not found")
+	ErrNoteNotFound         = errors.New("note not found")
+	ErrRelationshipNotFound = errors.New("relationship not found")
 )
 
 type AmbiguousIdeaRefError struct {

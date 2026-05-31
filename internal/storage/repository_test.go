@@ -144,6 +144,33 @@ func TestResolveIdeaIDFollowsMergedIdeas(t *testing.T) {
 	}
 }
 
+func TestRelationshipHelpersTreatSymmetricEdgeAsAdjacentBothWays(t *testing.T) {
+	from := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	to := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	relationship := model.Relationship{FromIdeaID: from, ToIdeaID: to, Kind: model.RelationSynonymOf}
+
+	neighbor, ok := relationshipNeighborID(relationship, to)
+	if !ok || neighbor != from {
+		t.Fatalf("expected symmetric stored edge to be adjacent from to-side, got %s ok=%v", neighbor, ok)
+	}
+	if label := relationshipLabelForIdea(relationship, to); label != model.RelationSynonymOf {
+		t.Fatalf("expected symmetric label to stay synonym_of, got %q", label)
+	}
+}
+
+func TestRelationshipLabelForIncomingDirectedEdgeUsesReverseLabel(t *testing.T) {
+	specialization := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	general := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	relationship := model.Relationship{FromIdeaID: specialization, ToIdeaID: general, Kind: model.RelationIsA}
+
+	if label := relationshipLabelForIdea(relationship, general); label != model.RelationGeneralizationOf {
+		t.Fatalf("expected incoming is_a label generalization_of, got %q", label)
+	}
+	if label := relationshipLabelForIdea(relationship, specialization); label != model.RelationIsA {
+		t.Fatalf("expected outgoing label is_a, got %q", label)
+	}
+}
+
 type fakeRunner struct {
 	prefixIDs []uuid.UUID
 	nameIDs   []uuid.UUID
