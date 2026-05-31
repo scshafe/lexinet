@@ -183,6 +183,9 @@ func newConfigCommand(opts *Options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if os.Getenv("LEXINET_TOKEN") != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: LEXINET_TOKEN is set; token files take precedence and config show redacts persisted tokens")
+			}
 			redacted := cfg.Redacted()
 			if opts.JSON {
 				return writeJSON(cmd.OutOrStdout(), redacted)

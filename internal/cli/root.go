@@ -23,6 +23,8 @@ const (
 
 type Options struct {
 	JSON      bool
+	Compact   bool
+	Quiet     bool
 	NoColor   bool
 	Endpoint  string
 	TokenFile string
@@ -65,10 +67,20 @@ func NewRoot(opts *Options) *cobra.Command {
 		return &ExitError{Code: ExitUsage, Err: err}
 	})
 	root.PersistentFlags().BoolVar(&opts.JSON, "json", false, "emit JSON output")
+	root.PersistentFlags().BoolVar(&opts.Compact, "compact", false, "emit compact JSON")
+	root.PersistentFlags().BoolVarP(&opts.Quiet, "quiet", "q", false, "emit only IDs where possible")
 	root.PersistentFlags().BoolVar(&opts.NoColor, "no-color", false, "disable colored output")
 	root.PersistentFlags().StringVar(&opts.Endpoint, "endpoint", "", "lexinet service endpoint")
 	root.PersistentFlags().StringVar(&opts.TokenFile, "token-file", "", "file containing bearer token")
 	root.AddCommand(
+		newIdeaCommand(opts),
+		newNameCommand(opts),
+		newBodyCommand(opts, "def"),
+		newBodyCommand(opts, "example"),
+		newBodyCommand(opts, "note"),
+		newLinkCommand(opts),
+		newTraverseCommand(opts),
+		newSearchCommand(opts),
 		newServeCommand(opts),
 		newMigrateCommand(opts),
 		newPingCommand(opts),
@@ -88,6 +100,19 @@ func exitCode(err error) int {
 
 func writeCLIError(w io.Writer, jsonOut bool, code int, err error) {
 	if jsonOut {
+		var serviceErr *ServiceError
+		if errors.As(err, &serviceErr) {
+			errorValue := map[string]any{
+				"code":      serviceErr.Code,
+				"message":   serviceErr.Message,
+				"exit_code": code,
+			}
+			if len(serviceErr.Candidates) > 0 {
+				errorValue["candidates"] = serviceErr.Candidates
+			}
+			_ = writeJSON(w, map[string]any{"error": errorValue})
+			return
+		}
 		_ = writeJSON(w, map[string]any{
 			"error": map[string]any{
 				"code":      code,
