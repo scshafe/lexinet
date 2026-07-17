@@ -299,7 +299,7 @@ GET /version   -> 200 {"version": "1.0.0"}
 ### Ideas + children (auth group)
 ```
 POST   /ideas                         create idea (+ optional inline names/definitions; all-or-nothing tx)
-GET    /ideas?limit&offset&q&slug      list/browse (paginated: {total,limit,offset,ideas[]})
+GET    /ideas?limit&offset&q&slug&topic list/browse (paginated: {total,limit,offset,ideas[]})
 GET    /ideas/{ref}?expand=...         fetch one (names always; ?expand=definitions,examples,notes,relationships)
 PATCH  /ideas/{ref}                    update summary/slug/domain/status
 DELETE /ideas/{ref}                    delete (cascades names/defs/examples/notes/relationships)
@@ -315,6 +315,27 @@ POST   /ideas/{ref}/examples     GET  /ideas/{ref}/examples     PATCH/DELETE /ex
 POST   /ideas/{ref}/notes        GET  /ideas/{ref}/notes        PATCH/DELETE /notes/{id}
 ```
 `{ref}` = UUID | UUID-prefix | exact citext name | slug. Ambiguous → `400 IDEA_REF_AMBIGUOUS` (response lists candidate ideas so the CLI can stay scriptable). `POST /ideas` requires ≥1 name; exactly one becomes primary/canonical (if none flagged, the first `canonical` else the first name is promoted). Setting `is_primary`/promoting a canonical name atomically demotes the prior one in one transaction.
+
+### Topics
+```
+POST   /topics                         create topic {name, slug?, description?}
+GET    /topics                         list topics
+PATCH  /topics/{ref}                   rename/update slug/description
+DELETE /topics/{ref}                   delete topic and assignments
+POST   /ideas/{ref}/topics             assign topic to idea {topic}
+GET    /ideas/{ref}/topics             list idea topics
+DELETE /ideas/{ref}/topics/{topic}     remove assignment
+GET    /topics/{ref}/ideas?limit&offset&q&slug list ideas assigned to topic
+```
+Topic refs accept UUID, slug, or name. Slugs normalize to lowercase dash-separated ASCII. Idea detail, list/search summaries, and topic-filtered lists include topic summaries where available.
+
+### Acronym entry links
+```
+POST   /acronym-links                  upsert acronym-entry link {acronym, expansion, note?}
+GET    /ideas/{ref}/acronym-links      list links touching an idea
+DELETE /acronym-links/{id}             remove one link
+```
+An acronym name (`names.kind = acronym`) is still a surface form on one idea. An acronym entry link is for two distinct ideas: a standalone acronym idea and a standalone expansion idea. The link rejects self-pairs, is listed from either side with direction `acronym` or `expansion`, and cascades on idea delete so dangling halves are not stranded.
 
 ### Relationships
 ```
@@ -334,7 +355,7 @@ GET /search?q=...&scope&fuzzy&threshold&kind&limit&offset
 | code | status | when |
 |---|---|---|
 | `BAD_REQUEST` | 400 | malformed body, unknown field, missing required field, empty `q` |
-| `IDEA_NOT_FOUND` / `NAME_NOT_FOUND` / `RELATIONSHIP_NOT_FOUND` | 404 | no match for ref |
+| `IDEA_NOT_FOUND` / `NAME_NOT_FOUND` / `RELATIONSHIP_NOT_FOUND` / `TOPIC_NOT_FOUND` / `ACRONYM_LINK_NOT_FOUND` | 404 | no match for ref/id |
 | `IDEA_REF_AMBIGUOUS` | 400 | UUID-prefix or name resolves to >1 idea (candidates returned) |
 | `INVALID_RELATIONSHIP_KIND` / `INVALID_NAME_KIND` | 400 | enum violation |
 | `RELATIONSHIP_SELF_EDGE` | 400 | from == to |
@@ -351,6 +372,8 @@ Form: `lexinet [global-flags] <group> <verb> [args] [flags]`. Every read & mutat
 ### Command groups
 - **`idea`** — `add "<canonical name>"` (`--definition <text|->`, `--example`, `--note`, `--alias` repeatable, `--domain`, `--slug`), `get <ref>` (`--expand`, `--no-relations`), `list` (`--limit`, `--offset`, `--q`, `--slug`), `edit <ref>`, `rm <ref> --yes`, `merge <ref> --into <ref> --yes`.
 - **`name`** — `add <idea-ref> "<text>" --kind canonical|acronym|alias|deprecated|localized [--lang --expansion --note]`, `rm`, `promote <idea-ref> "<text>"` (make canonical, demote prior), `list <idea-ref> [--kind]`.
+- **`topic`** — `add <name> [--slug --description]`, `list [--jsonl]`, `edit <topic-ref> [--slug --name --description]`, `assign <idea-ref> <topic-ref>`, `unassign <idea-ref> <topic-ref>`, `ideas <topic-ref> [--q --slug --limit --offset --jsonl]`.
+- **`acronym`** — `link <acronym-idea-ref> <expansion-idea-ref> [--note]`, `links <idea-ref> [--jsonl]`, `unlink <id> --yes`.
 - **`def`** — `add <idea-ref> <text|-> --kind definition|example|note [--source]`, `rm <id>`, `list <idea-ref> [--kind]`. `<text|->` reads stdin on `-` (`bodyFromFlag`).
 - **`link`** — `add <from-ref> <relation> <to-ref> [--note]` (idempotent), `rm`, `list <ref> [--relation --direction out|in|both]`. `<relation>` accepts base + virtual reverse names; unknown → exit 2 with the valid list.
 - **`traverse <ref>`** — `--relation` (repeatable), `--direction out|in|both`, `--depth` (max 6), `--format tree|edges|ids`, `--json`.
