@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"lexinet/internal/model"
+	"lexinet/internal/storage"
 )
 
 func TestOpenRoutesBypassAuth(t *testing.T) {
@@ -94,6 +95,203 @@ func TestSearchRejectsEmptyQuery(t *testing.T) {
 	assertError(t, rec, http.StatusBadRequest, "BAD_REQUEST")
 }
 
+func TestTopicRoutesCreateListUpdateAssignUnassignAndListByTopic(t *testing.T) {
+	topicID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	ideaID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := fakeStore{
+		createTopic: func(ctx context.Context, input model.CreateTopicInput) (*model.Topic, error) {
+			if input.Name != "Software" || input.Slug != "software" {
+				t.Fatalf("unexpected create topic input: %#v", input)
+			}
+			return &model.Topic{ID: topicID, Slug: input.Slug, Name: input.Name, CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0)}, nil
+		},
+		listTopics: func(ctx context.Context) ([]model.Topic, error) {
+			return []model.Topic{{ID: topicID, Slug: "software", Name: "Software"}}, nil
+		},
+		updateTopic: func(ctx context.Context, ref string, input model.UpdateTopicInput) (*model.Topic, error) {
+			if ref != "software" || input.Name == nil || *input.Name != "Software Systems" {
+				t.Fatalf("unexpected update topic input: ref=%q input=%#v", ref, input)
+			}
+			return &model.Topic{ID: topicID, Slug: "software", Name: *input.Name}, nil
+		},
+		assignTopic: func(ctx context.Context, ideaRef, topicRef string) (*model.Topic, error) {
+			if ideaRef != "rest" || topicRef != "software" {
+				t.Fatalf("unexpected assign refs: idea=%q topic=%q", ideaRef, topicRef)
+			}
+			return &model.Topic{ID: topicID, Slug: topicRef, Name: "Software"}, nil
+		},
+		listTopicsByIdeaRef: func(ctx context.Context, ref string) ([]model.TopicSummary, error) {
+			if ref != "rest" {
+				t.Fatalf("unexpected idea topic ref: %q", ref)
+			}
+			return []model.TopicSummary{{ID: topicID, Slug: "software", Name: "Software"}}, nil
+		},
+		listIdeasByTopic: func(ctx context.Context, topicRef string, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+			if topicRef != "software" || input.Query != "api" || input.Limit != 5 || input.Offset != 2 {
+				t.Fatalf("unexpected list by topic input: topic=%q input=%#v", topicRef, input)
+			}
+			return &model.IdeaListResponse{Total: 1, Limit: input.Limit, Offset: input.Offset, Ideas: []model.IdeaSummary{{ID: ideaID, CanonicalName: strPtr("REST"), Topics: []model.TopicSummary{{ID: topicID, Slug: "software", Name: "Software"}}}}}, nil
+		},
+		listIdeas: func(ctx context.Context, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+			if input.Topic != "software" {
+				t.Fatalf("expected topic filter, got %#v", input)
+			}
+			return &model.IdeaListResponse{Total: 1, Limit: input.Limit, Offset: input.Offset, Ideas: []model.IdeaSummary{{ID: ideaID, CanonicalName: strPtr("REST")}}}, nil
+		},
+		unassignTopic: func(ctx context.Context, ideaRef, topicRef string) error {
+			if ideaRef != "rest" || topicRef != "software" {
+				t.Fatalf("unexpected unassign refs: idea=%q topic=%q", ideaRef, topicRef)
+			}
+			return nil
+		},
+	}
+	router := Router(Config{}, store)
+
+	assertStatus(t, router, http.MethodPost, "/topics", `{"slug":"software","name":"Software"}`, http.StatusCreated)
+	assertStatus(t, router, http.MethodGet, "/topics", "", http.StatusOK)
+	assertStatus(t, router, http.MethodPatch, "/topics/software", `{"name":"Software Systems"}`, http.StatusOK)
+	assertStatus(t, router, http.MethodPost, "/ideas/rest/topics", `{"topic":"software"}`, http.StatusOK)
+	assertStatus(t, router, http.MethodGet, "/ideas/rest/topics", "", http.StatusOK)
+	assertStatus(t, router, http.MethodGet, "/topics/software/ideas?q=api&limit=5&offset=2", "", http.StatusOK)
+	assertStatus(t, router, http.MethodGet, "/ideas?topic=software", "", http.StatusOK)
+	assertStatus(t, router, http.MethodDelete, "/ideas/rest/topics/software", "", http.StatusNoContent)
+}
+
+func TestTopicRoutesReturnTypedErrorsForUnknownRefs(t *testing.T) {
+	store := fakeStore{
+		assignTopic: func(ctx context.Context, ideaRef, topicRef string) (*model.Topic, error) {
+			return nil, storage.ErrIdeaNotFound
+		},
+		listIdeasByTopic: func(ctx context.Context, topicRef string, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+			return nil, storage.ErrTopicNotFound
+		},
+	}
+	router := Router(Config{}, store)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/ideas/missing/topics", bytes.NewBufferString(`{"topic":"software"}`)))
+	assertError(t, rec, http.StatusNotFound, "IDEA_NOT_FOUND")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/topics/missing/ideas", nil))
+	assertError(t, rec, http.StatusNotFound, "TOPIC_NOT_FOUND")
+}
+
+func TestAcronymLinkRoutesCreateListDeleteAndBothSideVisibility(t *testing.T) {
+	linkID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	acronymID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	expansionID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	note := "common terminal UI abbreviation"
+	store := fakeStore{
+		upsertAcronymLink: func(ctx context.Context, input model.UpsertAcronymLinkInput) (*model.AcronymLink, error) {
+			if input.Acronym != "TUI" || input.Expansion != "Terminal User Interface" || input.Note == nil || *input.Note != note {
+				t.Fatalf("unexpected acronym link input: %#v", input)
+			}
+			return &model.AcronymLink{ID: linkID, AcronymIdeaID: acronymID, AcronymName: strPtr("TUI"), ExpansionIdeaID: expansionID, ExpansionName: strPtr("Terminal User Interface"), Note: &note}, nil
+		},
+		listAcronymLinksByIdeaRef: func(ctx context.Context, ref string) ([]model.AcronymLink, error) {
+			direction := model.AcronymLinkDirectionAcronym
+			if ref == "Terminal User Interface" {
+				direction = model.AcronymLinkDirectionExpansion
+			} else if ref != "TUI" {
+				t.Fatalf("unexpected acronym list ref: %q", ref)
+			}
+			return []model.AcronymLink{{ID: linkID, AcronymIdeaID: acronymID, AcronymName: strPtr("TUI"), ExpansionIdeaID: expansionID, ExpansionName: strPtr("Terminal User Interface"), Direction: &direction}}, nil
+		},
+		deleteAcronymLink: func(ctx context.Context, id uuid.UUID) error {
+			if id != linkID {
+				t.Fatalf("unexpected acronym link delete id: %s", id)
+			}
+			return nil
+		},
+	}
+	router := Router(Config{}, store)
+
+	assertStatus(t, router, http.MethodPost, "/acronym-links", `{"acronym":"TUI","expansion":"Terminal User Interface","note":"common terminal UI abbreviation"}`, http.StatusCreated)
+	assertAcronymDirection(t, router, "/ideas/TUI/acronym-links", model.AcronymLinkDirectionAcronym)
+	assertAcronymDirection(t, router, "/ideas/Terminal%20User%20Interface/acronym-links", model.AcronymLinkDirectionExpansion)
+	assertStatus(t, router, http.MethodDelete, "/acronym-links/33333333-3333-3333-3333-333333333333", "", http.StatusNoContent)
+}
+
+func TestAcronymLinkRoutesReturnTypedErrorsForUnknownRefs(t *testing.T) {
+	store := fakeStore{
+		upsertAcronymLink: func(ctx context.Context, input model.UpsertAcronymLinkInput) (*model.AcronymLink, error) {
+			return nil, storage.ErrIdeaNotFound
+		},
+		deleteAcronymLink: func(ctx context.Context, id uuid.UUID) error {
+			return storage.ErrAcronymLinkNotFound
+		},
+	}
+	router := Router(Config{}, store)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/acronym-links", bytes.NewBufferString(`{"acronym":"missing","expansion":"Terminal User Interface"}`)))
+	assertError(t, rec, http.StatusNotFound, "IDEA_NOT_FOUND")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/acronym-links/33333333-3333-3333-3333-333333333333", nil))
+	assertError(t, rec, http.StatusNotFound, "ACRONYM_LINK_NOT_FOUND")
+}
+
+func TestIdeaDetailIncludesTopicsAndAcronymLinks(t *testing.T) {
+	ideaID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	topicID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	linkID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	store := fakeStore{
+		getIdeaByRef: func(ctx context.Context, ref string) (*model.Idea, error) {
+			return &model.Idea{ID: ideaID, Status: model.IdeaStatusActive}, nil
+		},
+		listNamesByRef: func(ctx context.Context, ref string) ([]model.Name, error) {
+			return []model.Name{{ID: uuid.MustParse("66666666-6666-6666-6666-666666666666"), IdeaID: ideaID, Text: "TUI", Kind: model.NameKindCanonical}}, nil
+		},
+		listTopicsByIdeaRef: func(ctx context.Context, ref string) ([]model.TopicSummary, error) {
+			return []model.TopicSummary{{ID: topicID, Slug: "software", Name: "Software"}}, nil
+		},
+		listAcronymLinksByIdeaRef: func(ctx context.Context, ref string) ([]model.AcronymLink, error) {
+			return []model.AcronymLink{{ID: linkID, AcronymIdeaID: ideaID, AcronymName: strPtr("TUI"), ExpansionIdeaID: uuid.MustParse("55555555-5555-5555-5555-555555555555"), ExpansionName: strPtr("Terminal User Interface")}}, nil
+		},
+	}
+	router := Router(Config{}, store)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ideas/TUI", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Topics       []model.TopicSummary `json:"topics"`
+		AcronymLinks []model.AcronymLink  `json:"acronym_links"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if len(body.Topics) != 1 || body.Topics[0].Slug != "software" {
+		t.Fatalf("unexpected topics: %#v", body.Topics)
+	}
+	if len(body.AcronymLinks) != 1 || *body.AcronymLinks[0].ExpansionName != "Terminal User Interface" {
+		t.Fatalf("unexpected acronym links: %#v", body.AcronymLinks)
+	}
+}
+
+func TestSearchResponseIncludesEnrichment(t *testing.T) {
+	ideaID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+		return &model.SearchResponse{Query: input.Query, Scope: model.SearchScopeAll, Limit: input.Limit, Results: []model.SearchResult{{Idea: model.SearchIdea{ID: ideaID, CanonicalName: strPtr("TUI"), Topics: []model.TopicSummary{{Slug: "software", Name: "Software"}}, AcronymLinks: []model.AcronymLinkSummary{{ID: uuid.MustParse("33333333-3333-3333-3333-333333333333"), AcronymIdeaID: ideaID, ExpansionName: strPtr("Terminal User Interface")}}}, MatchType: model.SearchMatchExact}}}, nil
+	}}
+	router := Router(Config{}, store)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=TUI", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body model.SearchResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(body.Results) != 1 || len(body.Results[0].Idea.Topics) != 1 || len(body.Results[0].Idea.AcronymLinks) != 1 {
+		t.Fatalf("expected enriched search result, got %#v", body.Results)
+	}
+}
+
 func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 	if rec.Code != status {
@@ -108,12 +306,62 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 	}
 }
 
+func assertStatus(t *testing.T, router http.Handler, method, target, body string, status int) {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, target, nil)
+	} else {
+		req = httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != status {
+		t.Fatalf("%s %s status = %d, want %d: %s", method, target, rec.Code, status, rec.Body.String())
+	}
+}
+
+func strPtr(value string) *string {
+	return &value
+}
+
+func assertAcronymDirection(t *testing.T, router http.Handler, target string, direction model.AcronymLinkDirection) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d: %s", target, rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		AcronymLinks []model.AcronymLink `json:"acronym_links"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode acronym links: %v", err)
+	}
+	if len(body.AcronymLinks) != 1 || body.AcronymLinks[0].Direction == nil || *body.AcronymLinks[0].Direction != direction {
+		t.Fatalf("expected direction %q, got %#v", direction, body.AcronymLinks)
+	}
+}
+
 var errUnsupported = errors.New("unsupported fake store method")
 
 type fakeStore struct {
-	createIdea         func(context.Context, model.CreateIdeaInput) (*model.Idea, error)
-	upsertRelationship func(context.Context, string, string, model.RelationKind, *string) (*model.Relationship, error)
-	search             func(context.Context, model.SearchInput) (*model.SearchResponse, error)
+	createIdea                func(context.Context, model.CreateIdeaInput) (*model.Idea, error)
+	listIdeas                 func(context.Context, model.IdeaListInput) (*model.IdeaListResponse, error)
+	getIdeaByRef              func(context.Context, string) (*model.Idea, error)
+	listNamesByRef            func(context.Context, string) ([]model.Name, error)
+	upsertRelationship        func(context.Context, string, string, model.RelationKind, *string) (*model.Relationship, error)
+	createTopic               func(context.Context, model.CreateTopicInput) (*model.Topic, error)
+	listTopics                func(context.Context) ([]model.Topic, error)
+	updateTopic               func(context.Context, string, model.UpdateTopicInput) (*model.Topic, error)
+	assignTopic               func(context.Context, string, string) (*model.Topic, error)
+	unassignTopic             func(context.Context, string, string) error
+	listTopicsByIdeaRef       func(context.Context, string) ([]model.TopicSummary, error)
+	listIdeasByTopic          func(context.Context, string, model.IdeaListInput) (*model.IdeaListResponse, error)
+	upsertAcronymLink         func(context.Context, model.UpsertAcronymLinkInput) (*model.AcronymLink, error)
+	listAcronymLinksByIdeaRef func(context.Context, string) ([]model.AcronymLink, error)
+	deleteAcronymLink         func(context.Context, uuid.UUID) error
+	search                    func(context.Context, model.SearchInput) (*model.SearchResponse, error)
 }
 
 func (f fakeStore) CreateIdea(ctx context.Context, input model.CreateIdeaInput) (*model.Idea, error) {
@@ -137,10 +385,16 @@ func (f fakeStore) Search(ctx context.Context, input model.SearchInput) (*model.
 	return nil, errUnsupported
 }
 
-func (fakeStore) ListIdeas(context.Context, model.IdeaListInput) (*model.IdeaListResponse, error) {
+func (f fakeStore) ListIdeas(ctx context.Context, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+	if f.listIdeas != nil {
+		return f.listIdeas(ctx, input)
+	}
 	return &model.IdeaListResponse{}, nil
 }
-func (fakeStore) GetIdeaByRef(context.Context, string) (*model.Idea, error) {
+func (f fakeStore) GetIdeaByRef(ctx context.Context, ref string) (*model.Idea, error) {
+	if f.getIdeaByRef != nil {
+		return f.getIdeaByRef(ctx, ref)
+	}
 	return nil, errUnsupported
 }
 func (fakeStore) UpdateIdea(context.Context, string, model.UpdateIdeaInput) (*model.Idea, error) {
@@ -156,7 +410,10 @@ func (fakeStore) ResolveIdeaID(context.Context, string) (uuid.UUID, error) {
 func (fakeStore) AddNameByRef(context.Context, string, model.CreateNameInput) (*model.Name, error) {
 	return nil, errUnsupported
 }
-func (fakeStore) ListNamesByRef(context.Context, string) ([]model.Name, error) {
+func (f fakeStore) ListNamesByRef(ctx context.Context, ref string) ([]model.Name, error) {
+	if f.listNamesByRef != nil {
+		return f.listNamesByRef(ctx, ref)
+	}
 	return nil, errUnsupported
 }
 func (fakeStore) UpdateName(context.Context, uuid.UUID, model.UpdateNameInput) (*model.Name, error) {
@@ -201,28 +458,64 @@ func (fakeStore) DeleteRelationship(context.Context, uuid.UUID) error { return e
 func (fakeStore) TraverseRelationships(context.Context, string, model.TraverseRelationshipsInput) (*model.RelationshipTraversal, error) {
 	return nil, errUnsupported
 }
-func (fakeStore) CreateTopic(context.Context, model.CreateTopicInput) (*model.Topic, error) {
+func (f fakeStore) CreateTopic(ctx context.Context, input model.CreateTopicInput) (*model.Topic, error) {
+	if f.createTopic != nil {
+		return f.createTopic(ctx, input)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) ListTopics(context.Context) ([]model.Topic, error) { return nil, errUnsupported }
-func (fakeStore) UpdateTopic(context.Context, string, model.UpdateTopicInput) (*model.Topic, error) {
+func (f fakeStore) ListTopics(ctx context.Context) ([]model.Topic, error) {
+	if f.listTopics != nil {
+		return f.listTopics(ctx)
+	}
+	return nil, errUnsupported
+}
+func (f fakeStore) UpdateTopic(ctx context.Context, ref string, input model.UpdateTopicInput) (*model.Topic, error) {
+	if f.updateTopic != nil {
+		return f.updateTopic(ctx, ref, input)
+	}
 	return nil, errUnsupported
 }
 func (fakeStore) DeleteTopic(context.Context, string) error { return errUnsupported }
-func (fakeStore) AssignTopic(context.Context, string, string) (*model.Topic, error) {
+func (f fakeStore) AssignTopic(ctx context.Context, ideaRef, topicRef string) (*model.Topic, error) {
+	if f.assignTopic != nil {
+		return f.assignTopic(ctx, ideaRef, topicRef)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) UnassignTopic(context.Context, string, string) error { return errUnsupported }
-func (fakeStore) ListTopicsByIdeaRef(context.Context, string) ([]model.TopicSummary, error) {
+func (f fakeStore) UnassignTopic(ctx context.Context, ideaRef, topicRef string) error {
+	if f.unassignTopic != nil {
+		return f.unassignTopic(ctx, ideaRef, topicRef)
+	}
+	return errUnsupported
+}
+func (f fakeStore) ListTopicsByIdeaRef(ctx context.Context, ref string) ([]model.TopicSummary, error) {
+	if f.listTopicsByIdeaRef != nil {
+		return f.listTopicsByIdeaRef(ctx, ref)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) ListIdeasByTopic(context.Context, string, model.IdeaListInput) (*model.IdeaListResponse, error) {
+func (f fakeStore) ListIdeasByTopic(ctx context.Context, topicRef string, input model.IdeaListInput) (*model.IdeaListResponse, error) {
+	if f.listIdeasByTopic != nil {
+		return f.listIdeasByTopic(ctx, topicRef, input)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) UpsertAcronymLink(context.Context, model.UpsertAcronymLinkInput) (*model.AcronymLink, error) {
+func (f fakeStore) UpsertAcronymLink(ctx context.Context, input model.UpsertAcronymLinkInput) (*model.AcronymLink, error) {
+	if f.upsertAcronymLink != nil {
+		return f.upsertAcronymLink(ctx, input)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) ListAcronymLinksByIdeaRef(context.Context, string) ([]model.AcronymLink, error) {
+func (f fakeStore) ListAcronymLinksByIdeaRef(ctx context.Context, ref string) ([]model.AcronymLink, error) {
+	if f.listAcronymLinksByIdeaRef != nil {
+		return f.listAcronymLinksByIdeaRef(ctx, ref)
+	}
 	return nil, errUnsupported
 }
-func (fakeStore) DeleteAcronymLink(context.Context, uuid.UUID) error { return errUnsupported }
+func (f fakeStore) DeleteAcronymLink(ctx context.Context, id uuid.UUID) error {
+	if f.deleteAcronymLink != nil {
+		return f.deleteAcronymLink(ctx, id)
+	}
+	return errUnsupported
+}

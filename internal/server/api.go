@@ -710,7 +710,7 @@ func upsertAcronymLinkHandler(store Store) http.HandlerFunc {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, link)
+		writeJSON(w, http.StatusCreated, link)
 	}
 }
 
