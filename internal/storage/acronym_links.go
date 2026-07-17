@@ -36,16 +36,21 @@ func (r *Repository) UpsertAcronymLink(ctx context.Context, input model.UpsertAc
 	if acronymID == expansionID {
 		return nil, fmt.Errorf("upsert acronym link: acronym and expansion cannot be the same idea")
 	}
-	link, err := scanAcronymLink(tx.QueryRow(ctx, `
-		WITH upserted AS (
-			INSERT INTO acronym_links (acronym_idea_id, expansion_idea_id, note)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (acronym_idea_id, expansion_idea_id)
-			DO UPDATE SET note = EXCLUDED.note
-			RETURNING id
-		)
-		`+acronymLinkSelectPrefix+`
-		JOIN upserted u ON u.id = al.id`, acronymID, expansionID, input.Note))
+	// Two statements on purpose: a data-modifying CTE's rows are INVISIBLE to the outer
+	// SELECT's snapshot in the same statement (reading the table via JOIN found zero rows,
+	// surfacing a bogus not-found on every create). The tx sees its own completed first
+	// statement, so the follow-up SELECT by id is race-free.
+	var linkID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO acronym_links (acronym_idea_id, expansion_idea_id, note)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (acronym_idea_id, expansion_idea_id)
+		DO UPDATE SET note = EXCLUDED.note
+		RETURNING id`, acronymID, expansionID, input.Note).Scan(&linkID); err != nil {
+		return nil, err
+	}
+	link, err := scanAcronymLink(tx.QueryRow(ctx, acronymLinkSelectPrefix+`
+		WHERE al.id = $1`, linkID))
 	if err != nil {
 		return nil, err
 	}
