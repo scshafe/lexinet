@@ -52,6 +52,19 @@ type Store interface {
 	DeleteRelationship(context.Context, uuid.UUID) error
 	TraverseRelationships(context.Context, string, model.TraverseRelationshipsInput) (*model.RelationshipTraversal, error)
 
+	CreateTopic(context.Context, model.CreateTopicInput) (*model.Topic, error)
+	ListTopics(context.Context) ([]model.Topic, error)
+	UpdateTopic(context.Context, string, model.UpdateTopicInput) (*model.Topic, error)
+	DeleteTopic(context.Context, string) error
+	AssignTopic(context.Context, string, string) (*model.Topic, error)
+	UnassignTopic(context.Context, string, string) error
+	ListTopicsByIdeaRef(context.Context, string) ([]model.TopicSummary, error)
+	ListIdeasByTopic(context.Context, string, model.IdeaListInput) (*model.IdeaListResponse, error)
+
+	UpsertAcronymLink(context.Context, model.UpsertAcronymLinkInput) (*model.AcronymLink, error)
+	ListAcronymLinksByIdeaRef(context.Context, string) ([]model.AcronymLink, error)
+	DeleteAcronymLink(context.Context, uuid.UUID) error
+
 	Search(context.Context, model.SearchInput) (*model.SearchResponse, error)
 }
 
@@ -62,6 +75,8 @@ type expandedIdea struct {
 	Examples      []model.Example      `json:"examples,omitempty"`
 	Notes         []model.Note         `json:"notes,omitempty"`
 	Relationships []model.Relationship `json:"relationships,omitempty"`
+	Topics        []model.TopicSummary `json:"topics"`
+	AcronymLinks  []model.AcronymLink  `json:"acronym_links"`
 }
 
 func registerAPIRoutes(r chi.Router, store Store) {
@@ -94,6 +109,17 @@ func registerAPIRoutes(r chi.Router, store Store) {
 	r.Get("/relationships", listRelationshipsHandler(store))
 	r.Delete("/relationships/{id}", deleteRelationshipHandler(store))
 	r.Get("/ideas/{ref}/graph", graphHandler(store))
+	r.Post("/topics", createTopicHandler(store))
+	r.Get("/topics", listTopicsHandler(store))
+	r.Patch("/topics/{ref}", updateTopicHandler(store))
+	r.Delete("/topics/{ref}", deleteTopicHandler(store))
+	r.Get("/topics/{ref}/ideas", listIdeasByTopicHandler(store))
+	r.Post("/ideas/{ref}/topics", assignTopicHandler(store))
+	r.Get("/ideas/{ref}/topics", listIdeaTopicsHandler(store))
+	r.Delete("/ideas/{ref}/topics/{topic}", unassignTopicHandler(store))
+	r.Post("/acronym-links", upsertAcronymLinkHandler(store))
+	r.Delete("/acronym-links/{id}", deleteAcronymLinkHandler(store))
+	r.Get("/ideas/{ref}/acronym-links", listIdeaAcronymLinksHandler(store))
 	r.Get("/search", searchHandler(store))
 }
 
@@ -122,7 +148,7 @@ func listIdeasHandler(store Store) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		response, err := store.ListIdeas(r.Context(), model.IdeaListInput{Limit: limit, Offset: offset, Query: r.URL.Query().Get("q"), Slug: r.URL.Query().Get("slug")})
+		response, err := store.ListIdeas(r.Context(), model.IdeaListInput{Limit: limit, Offset: offset, Query: r.URL.Query().Get("q"), Slug: r.URL.Query().Get("slug"), Topic: r.URL.Query().Get("topic")})
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -141,6 +167,16 @@ func getIdeaHandler(store Store) http.HandlerFunc {
 		}
 		response := expandedIdea{Idea: idea}
 		response.Names, err = store.ListNamesByRef(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		response.Topics, err = store.ListTopicsByIdeaRef(r.Context(), ref)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		response.AcronymLinks, err = store.ListAcronymLinksByIdeaRef(r.Context(), ref)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -550,6 +586,159 @@ func graphHandler(store Store) http.HandlerFunc {
 	}
 }
 
+func createTopicHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input model.CreateTopicInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		topic, err := store.CreateTopic(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, topic)
+	}
+}
+
+func listTopicsHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		topics, err := store.ListTopics(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
+	}
+}
+
+func updateTopicHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input model.UpdateTopicInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		topic, err := store.UpdateTopic(r.Context(), chi.URLParam(r, "ref"), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, topic)
+	}
+}
+
+func deleteTopicHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := store.DeleteTopic(r.Context(), chi.URLParam(r, "ref")); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func assignTopicHandler(store Store) http.HandlerFunc {
+	type request struct {
+		Topic string `json:"topic"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input request
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if strings.TrimSpace(input.Topic) == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "topic is required")
+			return
+		}
+		topic, err := store.AssignTopic(r.Context(), chi.URLParam(r, "ref"), input.Topic)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, topic)
+	}
+}
+
+func unassignTopicHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := store.UnassignTopic(r.Context(), chi.URLParam(r, "ref"), chi.URLParam(r, "topic")); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func listIdeaTopicsHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		topics, err := store.ListTopicsByIdeaRef(r.Context(), chi.URLParam(r, "ref"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
+	}
+}
+
+func listIdeasByTopicHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, ok := queryInt(w, r, "limit", 20)
+		if !ok {
+			return
+		}
+		offset, ok := queryInt(w, r, "offset", 0)
+		if !ok {
+			return
+		}
+		response, err := store.ListIdeasByTopic(r.Context(), chi.URLParam(r, "ref"), model.IdeaListInput{Limit: limit, Offset: offset, Query: r.URL.Query().Get("q"), Slug: r.URL.Query().Get("slug")})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+func upsertAcronymLinkHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input model.UpsertAcronymLinkInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		link, err := store.UpsertAcronymLink(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, link)
+	}
+}
+
+func listIdeaAcronymLinksHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		links, err := store.ListAcronymLinksByIdeaRef(r.Context(), chi.URLParam(r, "ref"))
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"acronym_links": links})
+	}
+}
+
+func deleteAcronymLinkHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := uuidParam(w, r, "id")
+		if !ok {
+			return
+		}
+		if err := store.DeleteAcronymLink(r.Context(), id); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func searchHandler(store Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit, ok := queryInt(w, r, "limit", 20)
@@ -701,6 +890,14 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, storage.ErrRelationshipNotFound) {
 		writeError(w, http.StatusNotFound, "RELATIONSHIP_NOT_FOUND", "relationship not found")
+		return
+	}
+	if errors.Is(err, storage.ErrTopicNotFound) {
+		writeError(w, http.StatusNotFound, "TOPIC_NOT_FOUND", "topic not found")
+		return
+	}
+	if errors.Is(err, storage.ErrAcronymLinkNotFound) {
+		writeError(w, http.StatusNotFound, "ACRONYM_LINK_NOT_FOUND", "acronym link not found")
 		return
 	}
 	if errors.Is(err, storage.ErrInvalidNameKind) {

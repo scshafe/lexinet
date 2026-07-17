@@ -67,17 +67,20 @@ type IdeaListInput struct {
 	Offset int
 	Query  string
 	Slug   string
+	Topic  string
 }
 
 type IdeaSummary struct {
-	ID            uuid.UUID  `json:"id"`
-	Slug          *string    `json:"slug,omitempty"`
-	Summary       *string    `json:"summary,omitempty"`
-	Domain        *string    `json:"domain,omitempty"`
-	Status        IdeaStatus `json:"status"`
-	CanonicalName *string    `json:"canonical_name,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            uuid.UUID            `json:"id"`
+	Slug          *string              `json:"slug,omitempty"`
+	Summary       *string              `json:"summary,omitempty"`
+	Domain        *string              `json:"domain,omitempty"`
+	Status        IdeaStatus           `json:"status"`
+	CanonicalName *string              `json:"canonical_name,omitempty"`
+	Topics        []TopicSummary       `json:"topics,omitempty"`
+	AcronymLinks  []AcronymLinkSummary `json:"acronym_links,omitempty"`
+	CreatedAt     time.Time            `json:"created_at"`
+	UpdatedAt     time.Time            `json:"updated_at"`
 }
 
 type IdeaListResponse struct {

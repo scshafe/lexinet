@@ -14,13 +14,32 @@ var (
 	ErrSelfAcronymLink       = errors.New("acronym link cannot connect an idea to itself")
 )
 
+type AcronymLinkDirection string
+
+const (
+	AcronymLinkDirectionAcronym   AcronymLinkDirection = "acronym"
+	AcronymLinkDirectionExpansion AcronymLinkDirection = "expansion"
+)
+
 type AcronymLink struct {
-	ID              uuid.UUID `json:"id"`
-	AcronymIdeaID   uuid.UUID `json:"acronym_idea_id"`
-	ExpansionIdeaID uuid.UUID `json:"expansion_idea_id"`
-	Note            *string   `json:"note,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              uuid.UUID             `json:"id"`
+	AcronymIdeaID   uuid.UUID             `json:"acronym_idea_id"`
+	AcronymName     *string               `json:"acronym_name,omitempty"`
+	ExpansionIdeaID uuid.UUID             `json:"expansion_idea_id"`
+	ExpansionName   *string               `json:"expansion_name,omitempty"`
+	Direction       *AcronymLinkDirection `json:"direction,omitempty"`
+	Note            *string               `json:"note,omitempty"`
+	CreatedAt       time.Time             `json:"created_at"`
+	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+type AcronymLinkSummary struct {
+	ID              uuid.UUID             `json:"id"`
+	AcronymIdeaID   uuid.UUID             `json:"acronym_idea_id"`
+	AcronymName     *string               `json:"acronym_name,omitempty"`
+	ExpansionIdeaID uuid.UUID             `json:"expansion_idea_id"`
+	ExpansionName   *string               `json:"expansion_name,omitempty"`
+	Direction       *AcronymLinkDirection `json:"direction,omitempty"`
 }
 
 type CreateAcronymLinkInput struct {
@@ -29,38 +48,10 @@ type CreateAcronymLinkInput struct {
 	Note          *string `json:"note,omitempty"`
 }
 
-type UpdateAcronymLinkInput struct {
-	Note **string `json:"note,omitempty"`
-}
-
-type AcronymLinkedIdea struct {
-	ID            uuid.UUID `json:"id"`
-	Slug          *string   `json:"slug,omitempty"`
-	CanonicalName *string   `json:"canonical_name,omitempty"`
-	Summary       *string   `json:"summary,omitempty"`
-}
-
-type AcronymLinkSummary struct {
-	ID                     uuid.UUID `json:"id"`
-	AcronymIdeaID          uuid.UUID `json:"acronym_idea_id"`
-	ExpansionIdeaID        uuid.UUID `json:"expansion_idea_id"`
-	AcronymCanonicalName   *string   `json:"acronym_canonical_name,omitempty"`
-	ExpansionCanonicalName *string   `json:"expansion_canonical_name,omitempty"`
-	Note                   *string   `json:"note,omitempty"`
-}
-
-type AcronymLinkView struct {
-	ID        uuid.UUID         `json:"id"`
-	Acronym   AcronymLinkedIdea `json:"acronym"`
-	Expansion AcronymLinkedIdea `json:"expansion"`
-	Note      *string           `json:"note,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
-}
-
-type IdeaAcronymLinksView struct {
-	IdeaID       uuid.UUID         `json:"idea_id"`
-	AcronymLinks []AcronymLinkView `json:"acronym_links"`
+type UpsertAcronymLinkInput struct {
+	Acronym   string  `json:"acronym"`
+	Expansion string  `json:"expansion"`
+	Note      *string `json:"note,omitempty"`
 }
 
 func NormalizeCreateAcronymLinkInput(input CreateAcronymLinkInput) (CreateAcronymLinkInput, error) {

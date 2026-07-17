@@ -53,6 +53,9 @@ func (r *Repository) Search(ctx context.Context, input model.SearchInput) (*mode
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := r.enrichSearchResults(ctx, response.Results); err != nil {
+		return nil, err
+	}
 	return response, nil
 }
 

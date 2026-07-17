@@ -28,6 +28,8 @@ var (
 	ErrExampleNotFound      = errors.New("example not found")
 	ErrNoteNotFound         = errors.New("note not found")
 	ErrRelationshipNotFound = errors.New("relationship not found")
+	ErrTopicNotFound        = errors.New("topic not found")
+	ErrAcronymLinkNotFound  = errors.New("acronym link not found")
 )
 
 type AmbiguousIdeaRefError struct {
@@ -163,6 +165,17 @@ func (r *Repository) ListIdeas(ctx context.Context, input model.IdeaListInput) (
 	}
 	query := strings.TrimSpace(input.Query)
 	slug := strings.TrimSpace(input.Slug)
+	topic := strings.TrimSpace(input.Topic)
+	filterByTopic := false
+	var topicID uuid.UUID
+	if topic != "" {
+		var err error
+		topicID, err = resolveTopicID(ctx, r.db, topic)
+		if err != nil {
+			return nil, err
+		}
+		filterByTopic = true
+	}
 	rows, err := r.db.Query(ctx, `
 		WITH filtered AS (
 			SELECT i.id, i.slug, i.summary, i.domain, i.status, i.created_at, i.updated_at, cn.text::text AS canonical_name
@@ -170,11 +183,14 @@ func (r *Repository) ListIdeas(ctx context.Context, input model.IdeaListInput) (
 			LEFT JOIN names cn ON cn.id = i.canonical_name_id
 			WHERE ($1 = '' OR i.slug = $1)
 			  AND ($2 = '' OR i.summary ILIKE '%' || $2 || '%' OR i.domain ILIKE '%' || $2 || '%' OR cn.text::text ILIKE '%' || $2 || '%')
+			  AND (NOT $5::boolean OR EXISTS (
+				  SELECT 1 FROM idea_topics it WHERE it.idea_id = i.id AND it.topic_id = $6
+			  ))
 		)
 		SELECT count(*) OVER(), id, slug, summary, domain, status, canonical_name, created_at, updated_at
 		FROM filtered
 		ORDER BY coalesce(canonical_name, ''), created_at, id
-		LIMIT $3 OFFSET $4`, slug, query, input.Limit, input.Offset)
+		LIMIT $3 OFFSET $4`, slug, query, input.Limit, input.Offset, filterByTopic, topicID)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +214,9 @@ func (r *Repository) ListIdeas(ctx context.Context, input model.IdeaListInput) (
 		response.Ideas = append(response.Ideas, idea)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.enrichIdeaSummaries(ctx, response.Ideas); err != nil {
 		return nil, err
 	}
 	return response, nil

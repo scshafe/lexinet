@@ -23,6 +23,14 @@ type Topic struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type TopicSummary struct {
+	ID          uuid.UUID `json:"id"`
+	Slug        string    `json:"slug"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	IdeaCount   int       `json:"idea_count,omitempty"`
+}
+
 type CreateTopicInput struct {
 	Slug        string  `json:"slug,omitempty"`
 	Name        string  `json:"name"`
@@ -38,14 +46,6 @@ type UpdateTopicInput struct {
 type AssignTopicInput struct {
 	Idea  string `json:"idea"`
 	Topic string `json:"topic"`
-}
-
-type TopicSummary struct {
-	ID          uuid.UUID `json:"id"`
-	Slug        string    `json:"slug"`
-	Name        string    `json:"name"`
-	Description *string   `json:"description,omitempty"`
-	IdeaCount   int       `json:"idea_count,omitempty"`
 }
 
 type TopicView struct {

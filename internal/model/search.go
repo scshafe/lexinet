@@ -44,10 +44,12 @@ type SearchResponse struct {
 }
 
 type SearchIdea struct {
-	ID            uuid.UUID `json:"id"`
-	Slug          *string   `json:"slug,omitempty"`
-	CanonicalName *string   `json:"canonical_name,omitempty"`
-	Summary       *string   `json:"summary,omitempty"`
+	ID            uuid.UUID            `json:"id"`
+	Slug          *string              `json:"slug,omitempty"`
+	CanonicalName *string              `json:"canonical_name,omitempty"`
+	Summary       *string              `json:"summary,omitempty"`
+	Topics        []TopicSummary       `json:"topics,omitempty"`
+	AcronymLinks  []AcronymLinkSummary `json:"acronym_links,omitempty"`
 }
 
 type SearchResult struct {

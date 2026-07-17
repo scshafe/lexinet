@@ -201,3 +201,28 @@ func (fakeStore) DeleteRelationship(context.Context, uuid.UUID) error { return e
 func (fakeStore) TraverseRelationships(context.Context, string, model.TraverseRelationshipsInput) (*model.RelationshipTraversal, error) {
 	return nil, errUnsupported
 }
+func (fakeStore) CreateTopic(context.Context, model.CreateTopicInput) (*model.Topic, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) ListTopics(context.Context) ([]model.Topic, error) { return nil, errUnsupported }
+func (fakeStore) UpdateTopic(context.Context, string, model.UpdateTopicInput) (*model.Topic, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) DeleteTopic(context.Context, string) error { return errUnsupported }
+func (fakeStore) AssignTopic(context.Context, string, string) (*model.Topic, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) UnassignTopic(context.Context, string, string) error { return errUnsupported }
+func (fakeStore) ListTopicsByIdeaRef(context.Context, string) ([]model.TopicSummary, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) ListIdeasByTopic(context.Context, string, model.IdeaListInput) (*model.IdeaListResponse, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) UpsertAcronymLink(context.Context, model.UpsertAcronymLinkInput) (*model.AcronymLink, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) ListAcronymLinksByIdeaRef(context.Context, string) ([]model.AcronymLink, error) {
+	return nil, errUnsupported
+}
+func (fakeStore) DeleteAcronymLink(context.Context, uuid.UUID) error { return errUnsupported }
