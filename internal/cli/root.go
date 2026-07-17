@@ -74,6 +74,8 @@ func NewRoot(opts *Options) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.TokenFile, "token-file", "", "file containing bearer token")
 	root.AddCommand(
 		newIdeaCommand(opts),
+		newTopicCommand(opts),
+		newAcronymCommand(opts),
 		newNameCommand(opts),
 		newBodyCommand(opts, "def"),
 		newBodyCommand(opts, "example"),

@@ -105,7 +105,7 @@ func newIdeaGetCommand(opts *Options) *cobra.Command {
 }
 
 func newIdeaListCommand(opts *Options) *cobra.Command {
-	var q, slug string
+	var q, slug, topic string
 	var limit, offset int
 	var jsonl bool
 	cmd := &cobra.Command{
@@ -116,6 +116,7 @@ func newIdeaListCommand(opts *Options) *cobra.Command {
 			query := url.Values{}
 			setQuery(query, "q", q)
 			setQuery(query, "slug", slug)
+			setQuery(query, "topic", topic)
 			setQueryInt(query, "limit", limit)
 			setQueryInt(query, "offset", offset)
 			var out json.RawMessage
@@ -130,10 +131,205 @@ func newIdeaListCommand(opts *Options) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&q, "q", "", "filter by query")
 	cmd.Flags().StringVar(&slug, "slug", "", "filter by slug")
+	cmd.Flags().StringVar(&topic, "topic", "", "filter by topic ref")
 	cmd.Flags().IntVar(&limit, "limit", 20, "result limit")
 	cmd.Flags().IntVar(&offset, "offset", 0, "result offset")
 	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit ideas as JSON Lines")
 	return cmd
+}
+
+func newTopicCommand(opts *Options) *cobra.Command {
+	cmd := &cobra.Command{Use: "topic", Short: "Manage topics"}
+	cmd.AddCommand(newTopicAddCommand(opts), newTopicListCommand(opts), newTopicEditCommand(opts), newTopicAssignCommand(opts), newTopicUnassignCommand(opts), newTopicIdeasCommand(opts))
+	return cmd
+}
+
+func newTopicAddCommand(opts *Options) *cobra.Command {
+	var slug, description string
+	cmd := &cobra.Command{
+		Use:   "add <name>",
+		Short: "Create a topic",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			input := model.CreateTopicInput{Name: args[0], Slug: slug, Description: stringPtrIf(description)}
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, "/topics", input, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&slug, "slug", "", "stable topic slug")
+	cmd.Flags().StringVar(&description, "description", "", "topic description")
+	return cmd
+}
+
+func newTopicListCommand(opts *Options) *cobra.Command {
+	var jsonl bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List topics",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodGet, "/topics", nil, &out); err != nil {
+				return err
+			}
+			if jsonl {
+				return outputJSONLField(cmd, out, "topics")
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit topics as JSON Lines")
+	return cmd
+}
+
+func newTopicEditCommand(opts *Options) *cobra.Command {
+	var slug, name, description string
+	cmd := &cobra.Command{
+		Use:   "edit <topic-ref>",
+		Short: "Update a topic",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			patch := map[string]any{}
+			if cmd.Flags().Changed("slug") {
+				patch["slug"] = slug
+			}
+			if cmd.Flags().Changed("name") {
+				patch["name"] = name
+			}
+			if cmd.Flags().Changed("description") {
+				patch["description"] = description
+			}
+			if len(patch) == 0 {
+				return usageError("at least one field flag is required")
+			}
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPatch, apiPath("/topics/{}", args[0]), patch, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&slug, "slug", "", "new topic slug")
+	cmd.Flags().StringVar(&name, "name", "", "new topic name")
+	cmd.Flags().StringVar(&description, "description", "", "new topic description")
+	return cmd
+}
+
+func newTopicAssignCommand(opts *Options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "assign <idea-ref> <topic-ref>",
+		Short: "Assign a topic to an idea",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, apiPath("/ideas/{}/topics", args[0]), map[string]string{"topic": args[1]}, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	return cmd
+}
+
+func newTopicUnassignCommand(opts *Options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "unassign <idea-ref> <topic-ref>",
+		Short: "Remove a topic from an idea",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := clientDo(cmd.Context(), opts, http.MethodDelete, apiPath("/ideas/{}/topics/{}", args[0], args[1]), nil, nil); err != nil {
+				return err
+			}
+			return outputValue(cmd, opts, map[string]any{"ok": true, "idea": args[0], "topic": args[1]})
+		},
+	}
+	return cmd
+}
+
+func newTopicIdeasCommand(opts *Options) *cobra.Command {
+	var q, slug string
+	var limit, offset int
+	var jsonl bool
+	cmd := &cobra.Command{
+		Use:   "ideas <topic-ref>",
+		Short: "List ideas assigned to a topic",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := url.Values{}
+			setQuery(query, "q", q)
+			setQuery(query, "slug", slug)
+			setQueryInt(query, "limit", limit)
+			setQueryInt(query, "offset", offset)
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodGet, pathWithQuery(apiPath("/topics/{}/ideas", args[0]), query), nil, &out); err != nil {
+				return err
+			}
+			if jsonl {
+				return outputJSONLField(cmd, out, "ideas")
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&q, "q", "", "filter by query")
+	cmd.Flags().StringVar(&slug, "slug", "", "filter by slug")
+	cmd.Flags().IntVar(&limit, "limit", 20, "result limit")
+	cmd.Flags().IntVar(&offset, "offset", 0, "result offset")
+	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit ideas as JSON Lines")
+	return cmd
+}
+
+func newAcronymCommand(opts *Options) *cobra.Command {
+	cmd := &cobra.Command{Use: "acronym", Short: "Manage acronym entry links"}
+	cmd.AddCommand(newAcronymLinkCommand(opts), newAcronymLinksCommand(opts), newAcronymUnlinkCommand(opts))
+	return cmd
+}
+
+func newAcronymLinkCommand(opts *Options) *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "link <acronym-idea-ref> <expansion-idea-ref>",
+		Short: "Link an acronym entry to its expansion entry",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			input := model.UpsertAcronymLinkInput{Acronym: args[0], Expansion: args[1], Note: stringPtrIf(note)}
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, "/acronym-links", input, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "acronym link note")
+	return cmd
+}
+
+func newAcronymLinksCommand(opts *Options) *cobra.Command {
+	var jsonl bool
+	cmd := &cobra.Command{
+		Use:     "links <idea-ref>",
+		Aliases: []string{"list"},
+		Short:   "List acronym entry links for an idea",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodGet, apiPath("/ideas/{}/acronym-links", args[0]), nil, &out); err != nil {
+				return err
+			}
+			if jsonl {
+				return outputJSONLField(cmd, out, "acronym_links")
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit acronym links as JSON Lines")
+	return cmd
+}
+
+func newAcronymUnlinkCommand(opts *Options) *cobra.Command {
+	return deleteByIDCommand(opts, "unlink <id>", "Remove an acronym entry link", "/acronym-links/{}")
 }
 
 func newIdeaEditCommand(opts *Options) *cobra.Command {
