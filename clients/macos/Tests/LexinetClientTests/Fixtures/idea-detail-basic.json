@@ -1,0 +1,20 @@
+{
+  "id": "99999999-9999-9999-9999-999999999999",
+  "slug": "redis",
+  "summary": "In-memory data structure store",
+  "status": "active",
+  "canonical_name_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "created_at": "2026-07-17T00:00:00Z",
+  "updated_at": "2026-07-17T00:00:00Z",
+  "names": [
+    {
+      "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "idea_id": "99999999-9999-9999-9999-999999999999",
+      "text": "Redis",
+      "kind": "canonical",
+      "sort_key": 0,
+      "created_at": "2026-07-17T00:00:00Z",
+      "updated_at": "2026-07-17T00:00:00Z"
+    }
+  ]
+}
