@@ -423,7 +423,7 @@ func TestClientHTTPErrorExitCodeMapping(t *testing.T) {
 	}
 }
 
-func TestSearchCommandSendsStrategyAndExplicitFuzzyOverride(t *testing.T) {
+func TestSearchCommandSendsStrategyAndLegacyFlags(t *testing.T) {
 	setupClientConfig(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +431,7 @@ func TestSearchCommandSendsStrategyAndExplicitFuzzyOverride(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		query := r.URL.Query()
-		if query.Get("q") != "redos" || query.Get("strategy") != "legacy" || query.Get("fuzzy") != "false" || query.Get("threshold") != "0.45" {
+		if query.Get("q") != "redos" || query.Get("strategy") != "legacy" || query.Get("fuzzy") != "false" || query.Get("threshold") != "0.45" || query.Get("scope") != "names" || query.Get("kind") != "alias" || query.Get("limit") != "7" || query.Get("offset") != "3" {
 			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -439,9 +439,73 @@ func TestSearchCommandSendsStrategyAndExplicitFuzzyOverride(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--strategy", "legacy", "--no-fuzzy", "--threshold", "0.45"}, nil)
+	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--strategy", "legacy", "--no-fuzzy", "--threshold", "0.45", "--scope", "names", "--name-kind", "alias", "--limit", "7", "--offset", "3"}, nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
+	}
+}
+
+func TestSearchCommandFuzzyAndMinScoreAlias(t *testing.T) {
+	setupClientConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("q") != "redos" || query.Get("fuzzy") != "true" || query.Get("threshold") != "0.62" {
+			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"query":"redos","results":[]}`))
+	}))
+	defer server.Close()
+
+	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--fuzzy", "--min-score", "0.62"}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+}
+
+func TestSearchCommandJSONLEmitsOnlyResults(t *testing.T) {
+	setupClientConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"query":"redos","strategy":"daily-driver","total":2,"results":[{"id":"idea-1","canonical_name":"Redis"},{"id":"idea-2","canonical_name":"Postgres"}]}`))
+	}))
+	defer server.Close()
+
+	stdout, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--jsonl"}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "Redis") || !strings.Contains(lines[1], "Postgres") || strings.Contains(stdout, "daily-driver") {
+		t.Fatalf("unexpected search jsonl stdout: %q", stdout)
+	}
+}
+
+func TestSearchCommandInvalidNameKindIsUsageError(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--name-kind", "nickname"}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := exitCode(err); got != ExitUsage {
+		t.Fatalf("exit code = %d, want %d", got, ExitUsage)
+	}
+	if calls != 0 {
+		t.Fatalf("expected no HTTP calls for invalid name kind, got %d", calls)
 	}
 }
 
