@@ -188,6 +188,7 @@ final class LookupViewModel: ObservableObject {
 
 struct LookupView: View {
     @StateObject private var viewModel = LookupViewModel()
+    @StateObject private var updater = UpdateManager()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -200,9 +201,11 @@ struct LookupView: View {
                 captureForm
             }
             Spacer(minLength: 0)
+            updateFooter
         }
         .padding(18)
         .frame(width: 420, height: 520)
+        .task { await updater.refreshVersion() }
     }
 
     private var header: some View {
@@ -407,6 +410,75 @@ struct LookupView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             content()
+        }
+    }
+
+    private var updateFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            HStack(spacing: 10) {
+                Text("build \(updater.versionLabel)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                updateControls
+            }
+            if let status = updateStatusLine {
+                Text(status.message)
+                    .font(.caption)
+                    .foregroundStyle(status.color)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(status.message)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateControls: some View {
+        switch updater.phase {
+        case .idle, .upToDate:
+            Button("Check for Updates") {
+                Task { await updater.check() }
+            }
+            .controlSize(.small)
+        case .updateAvailable:
+            Button("Update Now") {
+                Task { await updater.update() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        case .checking, .updating, .restarting:
+            ProgressView()
+                .controlSize(.small)
+        case .updatedNeedsRelaunch:
+            EmptyView()
+        case .failed:
+            Button("Retry Check") {
+                Task { await updater.check() }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private var updateStatusLine: (message: String, color: Color)? {
+        switch updater.phase {
+        case .idle:
+            return nil
+        case .checking:
+            return ("Checking origin/main for new commits…", .secondary)
+        case .upToDate:
+            return ("Up to date.", .secondary)
+        case .updateAvailable(let behind):
+            return ("\(behind) new commit\(behind == 1 ? "" : "s") on origin/main.", .orange)
+        case .updating:
+            return ("Updating — pull, build, install… the popover may close when the app restarts.", .blue)
+        case .restarting:
+            return ("Update installed — restarting…", .blue)
+        case .updatedNeedsRelaunch:
+            return ("Updated — quit and relaunch the app to finish.", .green)
+        case .failed(let message):
+            return (message, .red)
         }
     }
 

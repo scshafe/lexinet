@@ -93,6 +93,31 @@ To start the helper after login:
 3. Add `~/Applications/LexinetMenuBar/LexinetMenuBar` or the packaged `.app` if you created one.
 4. Keep `lexinet serve --tailnet off` managed separately, for example with your preferred shell profile, launchd user agent, or manual startup.
 
+## Self-Update
+
+The popover footer shows the checkout's short commit hash and a `Check for Updates` button. Checking runs `git fetch origin` and counts `HEAD..origin/main` in the repository the running binary came from; when commits are available, `Update Now` appears.
+
+`Update Now` runs the repo-shipped `clients/macos/update.sh --no-restart` — the same script a manual update uses — then restarts the app:
+
+- `git pull --ff-only` (a failed pull or build aborts before anything is replaced, leaving the current install running)
+- `swift build -c release`
+- if a LaunchAgent plist (`~/Library/LaunchAgents/dev.lexinet.menubar.plist`) points at a different binary path, the fresh binary is installed there atomically
+- restart: when the running instance is the LaunchAgent's process, the app restarts itself via `launchctl kickstart -k`; a manually launched instance shows `Updated — quit and relaunch the app to finish` instead
+
+Manual update (same code path as the button):
+
+```sh
+cd ~/lexinet && git pull --ff-only && ./clients/macos/update.sh
+```
+
+Repository discovery walks up from the executable path, which covers running out of a clone's `.build` tree. If the binary was copied elsewhere (e.g. `~/Applications`), point the app at the clone with `defaults write dev.lexinet.menubar repoPath ~/lexinet` or the `LEXINET_REPO_PATH` environment variable. A LaunchAgent with a different label is supported via `LEXINET_LAUNCHAGENT_LABEL`.
+
+Notes:
+
+- Updates are button-triggered only; there is no background timer.
+- On the source machine (the checkout Mission Control develops in), fetch typically finds nothing and the footer reports `Up to date`.
+- Pulling executes repository code — the trust boundary is the same as a manual `git pull` of your own private repo.
+
 ## Operator Verification
 
 Sandbox verification cannot launch the macOS menu-bar UI. On Apple Silicon, verify:
