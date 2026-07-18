@@ -179,3 +179,83 @@ public struct AcronymLink: Decodable, Equatable, Identifiable {
         case role
     }
 }
+
+public enum SubmissionStatus: String, Decodable, Equatable {
+    case pending
+    case enriched
+    case failed
+}
+
+public struct Submission: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let term: String
+    public let context: String?
+    public let status: SubmissionStatus
+    public let ideaID: String?
+    public let note: String?
+    public let completedAt: Date?
+    public let createdAt: Date
+    public let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case term
+        case context
+        case status
+        case ideaID = "idea_id"
+        case note
+        case completedAt = "completed_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        term = try container.decode(String.self, forKey: .term)
+        context = try container.decodeIfPresent(String.self, forKey: .context)
+        status = try container.decode(SubmissionStatus.self, forKey: .status)
+        ideaID = try container.decodeIfPresent(String.self, forKey: .ideaID)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        completedAt = try Self.decodeDateIfPresent(container, forKey: .completedAt)
+        createdAt = try Self.decodeDate(container, forKey: .createdAt)
+        updatedAt = try Self.decodeDate(container, forKey: .updatedAt)
+    }
+
+    private static func decodeDate(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Date {
+        let raw = try container.decode(String.self, forKey: key)
+        if let date = parseGoDate(raw) {
+            return date
+        }
+        throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Invalid Go time value: \(raw)")
+    }
+
+    private static func decodeDateIfPresent(_ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Date? {
+        guard let raw = try container.decodeIfPresent(String.self, forKey: key) else {
+            return nil
+        }
+        if let date = parseGoDate(raw) {
+            return date
+        }
+        throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Invalid Go time value: \(raw)")
+    }
+
+    private static func parseGoDate(_ raw: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: raw) {
+            return date
+        }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: raw)
+    }
+}
+
+public struct ListSubmissionsResponse: Decodable, Equatable {
+    public let total: Int
+    public let limit: Int
+    public let offset: Int
+    public let submissions: [Submission]
+}

@@ -45,6 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class LookupViewModel: ObservableObject {
+    enum Mode: Equatable {
+        case search
+        case capture
+    }
+
     enum State: Equatable {
         case idle
         case loading
@@ -53,10 +58,26 @@ final class LookupViewModel: ObservableObject {
         case loaded(results: [SearchResult], selected: IdeaDetail?)
     }
 
+    enum CaptureState: Equatable {
+        case idle
+        case submitting
+        case unavailable(String)
+        case failed(String)
+        case succeeded(String)
+    }
+
+    @Published var mode: Mode = .search
     @Published var query = ""
+    @Published var captureTerm = ""
+    @Published var captureContext = ""
     @Published private(set) var state: State = .idle
+    @Published private(set) var captureState: CaptureState = .idle
 
     private let api: LexinetAPI
+
+    var canSubmitCapture: Bool {
+        !captureTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && captureState != .submitting
+    }
 
     init(api: LexinetAPI = LexinetAPI(baseURL: LookupViewModel.configuredEndpoint())) {
         self.api = api
@@ -97,6 +118,33 @@ final class LookupViewModel: ObservableObject {
         }
     }
 
+    func showSearch() {
+        mode = .search
+    }
+
+    func showCapture() {
+        mode = .capture
+        captureState = .idle
+    }
+
+    func submitCapture() async {
+        guard canSubmitCapture else { return }
+        captureState = .submitting
+        do {
+            _ = try await api.createSubmission(term: captureTerm, context: captureContext)
+            captureState = .succeeded("Queued for enrichment.")
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            captureTerm = ""
+            captureContext = ""
+            captureState = .idle
+            mode = .search
+        } catch let error as LexinetClientError {
+            applyCapture(error)
+        } catch {
+            captureState = .failed(error.localizedDescription)
+        }
+    }
+
     func select(_ result: SearchResult) async {
         do {
             let detail = try await api.ideaDetail(ref: result.idea.slug ?? result.idea.id)
@@ -125,6 +173,17 @@ final class LookupViewModel: ObservableObject {
             state = .failed(error.localizedDescription)
         }
     }
+
+    private func applyCapture(_ error: LexinetClientError) {
+        switch error {
+        case .serviceUnavailable(let message):
+            captureState = .unavailable(message)
+        case .nonSuccess(_, let message):
+            captureState = .failed(message)
+        case .invalidResponse:
+            captureState = .failed(error.localizedDescription)
+        }
+    }
 }
 
 struct LookupView: View {
@@ -133,8 +192,13 @@ struct LookupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
-            searchBar
-            content
+            switch viewModel.mode {
+            case .search:
+                searchBar
+                content
+            case .capture:
+                captureForm
+            }
             Spacer(minLength: 0)
         }
         .padding(18)
@@ -142,12 +206,31 @@ struct LookupView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("lexinet")
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
-            Text("Idea lookup from the menu bar")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("lexinet")
+                    .font(.system(size: 26, weight: .semibold, design: .rounded))
+                Text(viewModel.mode == .search ? "Idea lookup from the menu bar" : "Capture a term for agent enrichment")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if viewModel.mode == .search {
+                Button {
+                    viewModel.showCapture()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Capture a new idea or acronym")
+            } else {
+                Button("Search") {
+                    viewModel.showSearch()
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 
@@ -181,6 +264,74 @@ struct LookupView: View {
             } else {
                 resultsAndDetail(results: results, selected: selected)
             }
+        }
+    }
+
+    private var captureForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Idea (word or acronym)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("Required", text: $viewModel.captureTerm)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { Task { await viewModel.submitCapture() } }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Context / details")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $viewModel.captureContext)
+                    .font(.body)
+                    .frame(height: 120)
+                    .padding(4)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.25))
+                    )
+            }
+
+            captureStatus
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await viewModel.submitCapture() }
+                } label: {
+                    if viewModel.captureState == .submitting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Submit to Agent")
+                    }
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(!viewModel.canSubmitCapture)
+
+                Button("Submit (direct add later)") {}
+                    .disabled(true)
+                    .help("Direct add behavior will come later")
+            }
+
+            Text("Direct add later; this flow only queues a submission for enrichment.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var captureStatus: some View {
+        switch viewModel.captureState {
+        case .idle:
+            hint("Submit to Agent stores a pending submission; no direct idea is written.")
+        case .submitting:
+            statusBox(title: "Queuing submission", message: "Sending capture to lexinet...", color: .blue)
+        case .unavailable(let message):
+            statusBox(title: "Service unavailable", message: message, color: .orange)
+        case .failed(let message):
+            statusBox(title: "Capture failed", message: message, color: .red)
+        case .succeeded(let message):
+            statusBox(title: "Queued", message: message, color: .green)
         }
     }
 
@@ -264,6 +415,18 @@ struct LookupView: View {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
+    }
+
+    private func statusBox(title: String, message: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func serviceUnavailable(_ message: String) -> some View {

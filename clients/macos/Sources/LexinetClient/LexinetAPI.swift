@@ -24,11 +24,13 @@ public struct LexinetAPI {
     public let baseURL: URL
     private let session: URLSession
     private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
 
     public init(baseURL: URL = URL(string: "http://127.0.0.1:17892")!, session: URLSession = .shared) {
         self.baseURL = baseURL
         self.session = session
         self.decoder = JSONDecoder()
+        self.encoder = JSONEncoder()
     }
 
     public func search(query: String, limit: Int = 8) async throws -> SearchResponse {
@@ -53,8 +55,35 @@ public struct LexinetAPI {
         return try await get(url)
     }
 
+    public func createSubmission(term: String, context: String?) async throws -> Submission {
+        struct CreateSubmissionRequest: Encodable {
+            let term: String
+            let context: String?
+        }
+
+        let trimmedContext = context?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = CreateSubmissionRequest(
+            term: term.trimmingCharacters(in: .whitespacesAndNewlines),
+            context: trimmedContext?.isEmpty == true ? nil : trimmedContext
+        )
+        let url = baseURL.appendingPathComponent("submissions")
+        return try await post(url, body: request)
+    }
+
     private func get<T: Decodable>(_ url: URL) async throws -> T {
+        try await send(URLRequest(url: url))
+    }
+
+    private func post<T: Decodable, Body: Encodable>(_ url: URL, body: Body) async throws -> T {
         var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try encoder.encode(body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request)
+    }
+
+    private func send<T: Decodable>(_ originalRequest: URLRequest) async throws -> T {
+        var request = originalRequest
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let data: Data
