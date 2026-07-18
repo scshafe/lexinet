@@ -233,6 +233,92 @@ func TestAcronymLinkRoutesReturnTypedErrorsForUnknownRefs(t *testing.T) {
 	assertError(t, rec, http.StatusNotFound, "ACRONYM_LINK_NOT_FOUND")
 }
 
+func TestSubmissionRoutesCreateListCompleteFail(t *testing.T) {
+	submissionID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
+	ideaID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	now := time.Unix(1, 0)
+	store := fakeStore{
+		createSubmission: func(ctx context.Context, input model.CreateSubmissionInput) (*model.Submission, error) {
+			if input.Term != "TUI" || input.Context == nil || *input.Context != "menu bar capture" {
+				t.Fatalf("unexpected create submission input: %#v", input)
+			}
+			return &model.Submission{ID: submissionID, Term: input.Term, Context: input.Context, Status: model.SubmissionStatusPending, CreatedAt: now, UpdatedAt: now}, nil
+		},
+		listSubmissions: func(ctx context.Context, input model.ListSubmissionsInput) (*model.ListSubmissionsResponse, error) {
+			if input.Status == nil || *input.Status != model.SubmissionStatusPending || input.Limit != 5 || input.Offset != 2 {
+				t.Fatalf("unexpected list submissions input: %#v", input)
+			}
+			return &model.ListSubmissionsResponse{Total: 1, Limit: input.Limit, Offset: input.Offset, Submissions: []model.Submission{{ID: submissionID, Term: "TUI", Status: model.SubmissionStatusPending}}}, nil
+		},
+		completeSubmission: func(ctx context.Context, id uuid.UUID, input model.CompleteSubmissionInput) (*model.Submission, error) {
+			if id != submissionID || input.Idea != "Terminal User Interface" || input.Note == nil || *input.Note != "created idea" {
+				t.Fatalf("unexpected complete input: id=%s input=%#v", id, input)
+			}
+			return &model.Submission{ID: id, Term: "TUI", Status: model.SubmissionStatusEnriched, IdeaID: &ideaID, Note: input.Note, CompletedAt: &now, CreatedAt: now, UpdatedAt: now}, nil
+		},
+		failSubmission: func(ctx context.Context, id uuid.UUID, input model.FailSubmissionInput) (*model.Submission, error) {
+			if id != submissionID || input.Note == nil || *input.Note != "duplicate" {
+				t.Fatalf("unexpected fail input: id=%s input=%#v", id, input)
+			}
+			return &model.Submission{ID: id, Term: "TUI", Status: model.SubmissionStatusFailed, Note: input.Note, CompletedAt: &now, CreatedAt: now, UpdatedAt: now}, nil
+		},
+	}
+	router := Router(Config{}, store)
+
+	assertStatus(t, router, http.MethodPost, "/submissions", `{"term":"  TUI  ","context":" menu bar capture "}`, http.StatusCreated)
+	assertStatus(t, router, http.MethodGet, "/submissions?status=pending&limit=5&offset=2", "", http.StatusOK)
+	assertStatus(t, router, http.MethodPost, "/submissions/77777777-7777-7777-7777-777777777777/complete", `{"idea":" Terminal User Interface ","note":" created idea "}`, http.StatusOK)
+	assertStatus(t, router, http.MethodPost, "/submissions/77777777-7777-7777-7777-777777777777/fail", `{"note":" duplicate "}`, http.StatusOK)
+}
+
+func TestSubmissionRoutesRejectUnknownFieldsAndInvalidStatus(t *testing.T) {
+	router := Router(Config{}, fakeStore{})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/submissions", bytes.NewBufferString(`{"term":"TUI","extra":true}`)))
+	assertError(t, rec, http.StatusBadRequest, "BAD_REQUEST")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/submissions?status=done", nil))
+	assertError(t, rec, http.StatusBadRequest, "INVALID_SUBMISSION_STATUS")
+}
+
+func TestSubmissionRoutesMapMissingIdeaSubmissionAndInvalidTransition(t *testing.T) {
+	submissionID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
+	store := fakeStore{
+		completeSubmission: func(ctx context.Context, id uuid.UUID, input model.CompleteSubmissionInput) (*model.Submission, error) {
+			switch input.Idea {
+			case "missing-idea":
+				return nil, storage.ErrIdeaNotFound
+			case "terminal-row":
+				return nil, storage.ErrInvalidSubmissionTransition
+			default:
+				return nil, storage.ErrSubmissionNotFound
+			}
+		},
+		failSubmission: func(ctx context.Context, id uuid.UUID, input model.FailSubmissionInput) (*model.Submission, error) {
+			return nil, storage.ErrInvalidSubmissionTransition
+		},
+	}
+	router := Router(Config{}, store)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/submissions/"+submissionID.String()+"/complete", bytes.NewBufferString(`{"idea":"missing-idea"}`)))
+	assertError(t, rec, http.StatusNotFound, "IDEA_NOT_FOUND")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/submissions/"+submissionID.String()+"/complete", bytes.NewBufferString(`{"idea":"missing-submission"}`)))
+	assertError(t, rec, http.StatusNotFound, "SUBMISSION_NOT_FOUND")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/submissions/"+submissionID.String()+"/complete", bytes.NewBufferString(`{"idea":"terminal-row"}`)))
+	assertError(t, rec, http.StatusConflict, "SUBMISSION_INVALID_TRANSITION")
+
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/submissions/"+submissionID.String()+"/fail", bytes.NewBufferString(`{"note":"already done"}`)))
+	assertError(t, rec, http.StatusConflict, "SUBMISSION_INVALID_TRANSITION")
+}
+
 func TestIdeaDetailIncludesTopicsAndAcronymLinks(t *testing.T) {
 	ideaID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	topicID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
@@ -361,6 +447,10 @@ type fakeStore struct {
 	upsertAcronymLink         func(context.Context, model.UpsertAcronymLinkInput) (*model.AcronymLink, error)
 	listAcronymLinksByIdeaRef func(context.Context, string) ([]model.AcronymLink, error)
 	deleteAcronymLink         func(context.Context, uuid.UUID) error
+	createSubmission          func(context.Context, model.CreateSubmissionInput) (*model.Submission, error)
+	listSubmissions           func(context.Context, model.ListSubmissionsInput) (*model.ListSubmissionsResponse, error)
+	completeSubmission        func(context.Context, uuid.UUID, model.CompleteSubmissionInput) (*model.Submission, error)
+	failSubmission            func(context.Context, uuid.UUID, model.FailSubmissionInput) (*model.Submission, error)
 	search                    func(context.Context, model.SearchInput) (*model.SearchResponse, error)
 }
 
@@ -518,4 +608,32 @@ func (f fakeStore) DeleteAcronymLink(ctx context.Context, id uuid.UUID) error {
 		return f.deleteAcronymLink(ctx, id)
 	}
 	return errUnsupported
+}
+
+func (f fakeStore) CreateSubmission(ctx context.Context, input model.CreateSubmissionInput) (*model.Submission, error) {
+	if f.createSubmission != nil {
+		return f.createSubmission(ctx, input)
+	}
+	return nil, errUnsupported
+}
+
+func (f fakeStore) ListSubmissions(ctx context.Context, input model.ListSubmissionsInput) (*model.ListSubmissionsResponse, error) {
+	if f.listSubmissions != nil {
+		return f.listSubmissions(ctx, input)
+	}
+	return nil, errUnsupported
+}
+
+func (f fakeStore) CompleteSubmission(ctx context.Context, id uuid.UUID, input model.CompleteSubmissionInput) (*model.Submission, error) {
+	if f.completeSubmission != nil {
+		return f.completeSubmission(ctx, id, input)
+	}
+	return nil, errUnsupported
+}
+
+func (f fakeStore) FailSubmission(ctx context.Context, id uuid.UUID, input model.FailSubmissionInput) (*model.Submission, error) {
+	if f.failSubmission != nil {
+		return f.failSubmission(ctx, id, input)
+	}
+	return nil, errUnsupported
 }

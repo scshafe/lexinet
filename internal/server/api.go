@@ -65,6 +65,11 @@ type Store interface {
 	ListAcronymLinksByIdeaRef(context.Context, string) ([]model.AcronymLink, error)
 	DeleteAcronymLink(context.Context, uuid.UUID) error
 
+	CreateSubmission(context.Context, model.CreateSubmissionInput) (*model.Submission, error)
+	ListSubmissions(context.Context, model.ListSubmissionsInput) (*model.ListSubmissionsResponse, error)
+	CompleteSubmission(context.Context, uuid.UUID, model.CompleteSubmissionInput) (*model.Submission, error)
+	FailSubmission(context.Context, uuid.UUID, model.FailSubmissionInput) (*model.Submission, error)
+
 	Search(context.Context, model.SearchInput) (*model.SearchResponse, error)
 }
 
@@ -120,6 +125,10 @@ func registerAPIRoutes(r chi.Router, store Store) {
 	r.Post("/acronym-links", upsertAcronymLinkHandler(store))
 	r.Delete("/acronym-links/{id}", deleteAcronymLinkHandler(store))
 	r.Get("/ideas/{ref}/acronym-links", listIdeaAcronymLinksHandler(store))
+	r.Post("/submissions", createSubmissionHandler(store))
+	r.Get("/submissions", listSubmissionsHandler(store))
+	r.Post("/submissions/{id}/complete", completeSubmissionHandler(store))
+	r.Post("/submissions/{id}/fail", failSubmissionHandler(store))
 	r.Get("/search", searchHandler(store))
 }
 
@@ -739,6 +748,99 @@ func deleteAcronymLinkHandler(store Store) http.HandlerFunc {
 	}
 }
 
+func createSubmissionHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var input model.CreateSubmissionInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		input, err := model.NormalizeCreateSubmissionInput(input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		submission, err := store.CreateSubmission(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, submission)
+	}
+}
+
+func listSubmissionsHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, ok := queryInt(w, r, "limit", 20)
+		if !ok {
+			return
+		}
+		offset, ok := queryInt(w, r, "offset", 0)
+		if !ok {
+			return
+		}
+		input := model.ListSubmissionsInput{Limit: limit, Offset: offset}
+		if statusValue := strings.TrimSpace(r.URL.Query().Get("status")); statusValue != "" {
+			status := model.SubmissionStatus(statusValue)
+			input.Status = &status
+		}
+		input, err := model.NormalizeListSubmissionsInput(input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		response, err := store.ListSubmissions(r.Context(), input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+func completeSubmissionHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := uuidParam(w, r, "id")
+		if !ok {
+			return
+		}
+		var input model.CompleteSubmissionInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		input, err := model.NormalizeCompleteSubmissionInput(input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		submission, err := store.CompleteSubmission(r.Context(), id, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, submission)
+	}
+}
+
+func failSubmissionHandler(store Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := uuidParam(w, r, "id")
+		if !ok {
+			return
+		}
+		var input model.FailSubmissionInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		input = model.NormalizeFailSubmissionInput(input)
+		submission, err := store.FailSubmission(r.Context(), id, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, submission)
+	}
+}
+
 func searchHandler(store Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit, ok := queryInt(w, r, "limit", 20)
@@ -900,8 +1002,20 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "ACRONYM_LINK_NOT_FOUND", "acronym link not found")
 		return
 	}
+	if errors.Is(err, storage.ErrSubmissionNotFound) {
+		writeError(w, http.StatusNotFound, "SUBMISSION_NOT_FOUND", "submission not found")
+		return
+	}
+	if errors.Is(err, storage.ErrInvalidSubmissionTransition) {
+		writeError(w, http.StatusConflict, "SUBMISSION_INVALID_TRANSITION", "submission is not pending")
+		return
+	}
 	if errors.Is(err, storage.ErrInvalidNameKind) {
 		writeError(w, http.StatusBadRequest, "INVALID_NAME_KIND", "invalid name kind")
+		return
+	}
+	if errors.Is(err, model.ErrInvalidSubmissionStatus) {
+		writeError(w, http.StatusBadRequest, "INVALID_SUBMISSION_STATUS", "invalid submission status")
 		return
 	}
 	if errors.Is(err, model.ErrInvalidRelationKind) {
