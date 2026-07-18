@@ -35,18 +35,21 @@ func (r *Repository) Search(ctx context.Context, input model.SearchInput) (*mode
 	defer rows.Close()
 
 	response := &model.SearchResponse{
-		Query:   input.Query,
-		Scope:   input.Scope,
-		Fuzzy:   input.Fuzzy,
-		Limit:   input.Limit,
-		Offset:  input.Offset,
-		Results: make([]model.SearchResult, 0),
+		Query:      input.Query,
+		Scope:      input.Scope,
+		Fuzzy:      input.Fuzzy,
+		Limit:      input.Limit,
+		Offset:     input.Offset,
+		Results:    make([]model.SearchResult, 0),
+		Strategy:   input.Strategy,
+		Provenance: model.SearchResponseProvenance(input),
 	}
 	for rows.Next() {
 		result, total, err := scanSearchResult(rows)
 		if err != nil {
 			return nil, err
 		}
+		result.Provenance = model.SearchResultProvenance(input, *result)
 		response.Total = total
 		response.Results = append(response.Results, *result)
 	}

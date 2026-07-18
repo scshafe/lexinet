@@ -378,6 +378,35 @@ func TestSearchResponseIncludesEnrichment(t *testing.T) {
 	}
 }
 
+func TestSearchHandlerPassesStrategyAndExplicitFuzzyOverride(t *testing.T) {
+	store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+		if input.Strategy != "legacy" {
+			t.Fatalf("strategy = %q, want legacy", input.Strategy)
+		}
+		if input.FuzzyOverride == nil || *input.FuzzyOverride {
+			t.Fatalf("expected explicit fuzzy=false override, got %#v", input.FuzzyOverride)
+		}
+		input, err := model.NormalizeSearchInput(input)
+		if err != nil {
+			return nil, err
+		}
+		return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy, Limit: input.Limit, Provenance: model.SearchResponseProvenance(input)}, nil
+	}}
+	router := Router(Config{}, store)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=redos&strategy=legacy&fuzzy=false", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body model.SearchResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if body.Strategy != "legacy" || body.Fuzzy {
+		t.Fatalf("unexpected search response strategy/fuzzy: %#v", body)
+	}
+}
+
 func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 	if rec.Code != status {

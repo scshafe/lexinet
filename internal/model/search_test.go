@@ -1,8 +1,13 @@
 package model
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
 
-func TestNormalizeSearchInputDefaultsToAllWithoutFuzzy(t *testing.T) {
+	searchcfg "lexinet/internal/search"
+)
+
+func TestNormalizeSearchInputDefaultsToDailyDriverWithFuzzy(t *testing.T) {
 	input, err := NormalizeSearchInput(SearchInput{Query: "  in-memory cache  "})
 	if err != nil {
 		t.Fatalf("expected valid search input, got %v", err)
@@ -13,11 +18,74 @@ func TestNormalizeSearchInputDefaultsToAllWithoutFuzzy(t *testing.T) {
 	if input.Scope != SearchScopeAll {
 		t.Fatalf("expected all scope by default, got %q", input.Scope)
 	}
-	if input.Fuzzy {
-		t.Fatalf("expected fuzzy to remain opt-in")
+	if input.Strategy != searchcfg.StrategyDailyDriver {
+		t.Fatalf("expected daily-driver strategy by default, got %q", input.Strategy)
+	}
+	if !input.Fuzzy {
+		t.Fatalf("expected fuzzy enabled by default")
 	}
 	if input.Threshold != 0.3 || input.Limit != 20 || input.Offset != 0 {
 		t.Fatalf("unexpected defaults: %#v", input)
+	}
+}
+
+func TestNormalizeSearchInputLegacyDefaultsToFuzzyOff(t *testing.T) {
+	input, err := NormalizeSearchInput(SearchInput{Query: "cache", Strategy: searchcfg.StrategyLegacy})
+	if err != nil {
+		t.Fatalf("expected valid legacy search input, got %v", err)
+	}
+	if input.Strategy != searchcfg.StrategyLegacy {
+		t.Fatalf("strategy = %q, want legacy", input.Strategy)
+	}
+	if input.Fuzzy {
+		t.Fatalf("expected legacy fuzzy default to be off")
+	}
+}
+
+func TestNormalizeSearchInputRejectsUnknownStrategy(t *testing.T) {
+	if _, err := NormalizeSearchInput(SearchInput{Query: "rest", Strategy: "experimental"}); err == nil {
+		t.Fatalf("expected invalid strategy error")
+	}
+}
+
+func TestNormalizeSearchInputDistinguishesFuzzyOverride(t *testing.T) {
+	var omitted SearchInput
+	if err := json.Unmarshal([]byte(`{"query":"redos"}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	omitted, err := NormalizeSearchInput(omitted)
+	if err != nil {
+		t.Fatalf("normalize omitted: %v", err)
+	}
+	if !omitted.Fuzzy {
+		t.Fatalf("omitted fuzzy should use daily-driver fuzzy=true")
+	}
+
+	var explicitFalse SearchInput
+	if err := json.Unmarshal([]byte(`{"query":"redos","fuzzy":false}`), &explicitFalse); err != nil {
+		t.Fatal(err)
+	}
+	if explicitFalse.FuzzyOverride == nil {
+		t.Fatalf("expected explicit false to be recorded as an override")
+	}
+	explicitFalse, err = NormalizeSearchInput(explicitFalse)
+	if err != nil {
+		t.Fatalf("normalize explicit false: %v", err)
+	}
+	if explicitFalse.Fuzzy {
+		t.Fatalf("explicit fuzzy=false should disable fuzzy")
+	}
+
+	var explicitTrue SearchInput
+	if err := json.Unmarshal([]byte(`{"query":"redos","strategy":"legacy","fuzzy":true}`), &explicitTrue); err != nil {
+		t.Fatal(err)
+	}
+	explicitTrue, err = NormalizeSearchInput(explicitTrue)
+	if err != nil {
+		t.Fatalf("normalize explicit true: %v", err)
+	}
+	if !explicitTrue.Fuzzy {
+		t.Fatalf("explicit fuzzy=true should override legacy fuzzy default")
 	}
 }
 
@@ -45,5 +113,27 @@ func TestNormalizeSearchInputValidatesEnumsAndBounds(t *testing.T) {
 	}
 	if _, err := NormalizeSearchInput(SearchInput{Query: "   "}); err == nil {
 		t.Fatalf("expected empty query error")
+	}
+}
+
+func TestNormalizeSearchInputMatcherWeightDefaults(t *testing.T) {
+	input, err := NormalizeSearchInput(SearchInput{Query: "redis"})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	weights := map[searchcfg.MatcherName]float64{}
+	for _, matcher := range input.StrategyConfig.Matchers {
+		weights[matcher.Name] = matcher.Weight
+	}
+	for matcher, want := range map[searchcfg.MatcherName]float64{
+		searchcfg.MatcherExact:     1.0,
+		searchcfg.MatcherPrefix:    0.8,
+		searchcfg.MatcherFullText:  0.6,
+		searchcfg.MatcherFuzzyName: 0.5,
+		searchcfg.MatcherFuzzyBody: 0.3,
+	} {
+		if weights[matcher] != want {
+			t.Fatalf("weight[%s] = %g, want %g", matcher, weights[matcher], want)
+		}
 	}
 }

@@ -771,8 +771,8 @@ func newTraverseCommand(opts *Options) *cobra.Command {
 }
 
 func newSearchCommand(opts *Options) *cobra.Command {
-	var fuzzy, jsonl bool
-	var scope, nameKind string
+	var fuzzy, noFuzzy, jsonl bool
+	var scope, nameKind, strategy string
 	var threshold, minScore float64
 	var limit, offset int
 	cmd := &cobra.Command{
@@ -782,11 +782,20 @@ func newSearchCommand(opts *Options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := url.Values{}
 			query.Set("q", args[0])
+			if strategy != "" {
+				query.Set("strategy", strategy)
+			}
 			if scope != "" {
 				query.Set("scope", scope)
 			}
-			if fuzzy {
+			if cmd.Flags().Changed("fuzzy") && cmd.Flags().Changed("no-fuzzy") {
+				return usageError("--fuzzy and --no-fuzzy cannot both be set")
+			}
+			if cmd.Flags().Changed("fuzzy") && fuzzy {
 				query.Set("fuzzy", "true")
+			}
+			if cmd.Flags().Changed("no-fuzzy") && noFuzzy {
+				query.Set("fuzzy", "false")
 			}
 			if threshold != 0 {
 				query.Set("threshold", fmt.Sprintf("%g", threshold))
@@ -813,6 +822,8 @@ func newSearchCommand(opts *Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&fuzzy, "fuzzy", false, "enable fuzzy matching")
+	cmd.Flags().BoolVar(&noFuzzy, "no-fuzzy", false, "disable fuzzy matching for this search")
+	cmd.Flags().StringVar(&strategy, "strategy", "", "search strategy: daily-driver or legacy")
 	cmd.Flags().StringVar(&scope, "scope", "", "names or all")
 	cmd.Flags().StringVar(&nameKind, "name-kind", "", "filter by name kind")
 	cmd.Flags().Float64Var(&threshold, "threshold", 0, "fuzzy threshold")

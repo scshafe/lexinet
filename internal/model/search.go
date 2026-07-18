@@ -1,10 +1,13 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+
+	searchcfg "lexinet/internal/search"
 )
 
 type SearchScope string
@@ -16,6 +19,8 @@ const (
 
 type SearchMatchType string
 
+type SearchStrategyName = searchcfg.StrategyName
+
 const (
 	SearchMatchExact  SearchMatchType = "exact"
 	SearchMatchPrefix SearchMatchType = "prefix"
@@ -24,23 +29,29 @@ const (
 )
 
 type SearchInput struct {
-	Query     string      `json:"query"`
-	Scope     SearchScope `json:"scope,omitempty"`
-	Fuzzy     bool        `json:"fuzzy,omitempty"`
-	Threshold float64     `json:"threshold,omitempty"`
-	Kinds     []NameKind  `json:"kinds,omitempty"`
-	Limit     int         `json:"limit,omitempty"`
-	Offset    int         `json:"offset,omitempty"`
+	Query             string                 `json:"query"`
+	Scope             SearchScope            `json:"scope,omitempty"`
+	Fuzzy             bool                   `json:"fuzzy,omitempty"`
+	Threshold         float64                `json:"threshold,omitempty"`
+	Kinds             []NameKind             `json:"kinds,omitempty"`
+	Limit             int                    `json:"limit,omitempty"`
+	Offset            int                    `json:"offset,omitempty"`
+	Strategy          searchcfg.StrategyName `json:"strategy,omitempty"`
+	FuzzyOverride     *bool                  `json:"-"`
+	ThresholdOverride *float64               `json:"-"`
+	StrategyConfig    searchcfg.Strategy     `json:"-"`
 }
 
 type SearchResponse struct {
-	Query   string         `json:"query"`
-	Scope   SearchScope    `json:"scope"`
-	Fuzzy   bool           `json:"fuzzy"`
-	Total   int            `json:"total"`
-	Limit   int            `json:"limit"`
-	Offset  int            `json:"offset"`
-	Results []SearchResult `json:"results"`
+	Query      string                        `json:"query"`
+	Scope      SearchScope                   `json:"scope"`
+	Fuzzy      bool                          `json:"fuzzy"`
+	Total      int                           `json:"total"`
+	Limit      int                           `json:"limit"`
+	Offset     int                           `json:"offset"`
+	Results    []SearchResult                `json:"results"`
+	Strategy   searchcfg.StrategyName        `json:"strategy,omitempty"`
+	Provenance *searchcfg.ResponseProvenance `json:"provenance,omitempty"`
 }
 
 type SearchIdea struct {
@@ -53,15 +64,50 @@ type SearchIdea struct {
 }
 
 type SearchResult struct {
-	Idea            SearchIdea      `json:"idea"`
-	Score           float64         `json:"score"`
-	MatchedVia      string          `json:"matched_via"`
-	MatchedField    string          `json:"matched_field"`
-	MatchedName     *string         `json:"matched_name,omitempty"`
-	MatchedNameType *NameKind       `json:"matched_name_type,omitempty"`
-	MatchType       SearchMatchType `json:"match_type"`
-	Similarity      *float64        `json:"similarity,omitempty"`
-	Headline        *string         `json:"headline,omitempty"`
+	Idea            SearchIdea                  `json:"idea"`
+	Score           float64                     `json:"score"`
+	MatchedVia      string                      `json:"matched_via"`
+	MatchedField    string                      `json:"matched_field"`
+	MatchedName     *string                     `json:"matched_name,omitempty"`
+	MatchedNameType *NameKind                   `json:"matched_name_type,omitempty"`
+	MatchType       SearchMatchType             `json:"match_type"`
+	Similarity      *float64                    `json:"similarity,omitempty"`
+	Headline        *string                     `json:"headline,omitempty"`
+	Provenance      *searchcfg.ResultProvenance `json:"provenance,omitempty"`
+}
+
+func (input *SearchInput) UnmarshalJSON(data []byte) error {
+	type wireInput struct {
+		Query     string                 `json:"query"`
+		Scope     SearchScope            `json:"scope,omitempty"`
+		Fuzzy     *bool                  `json:"fuzzy,omitempty"`
+		Threshold *float64               `json:"threshold,omitempty"`
+		Kinds     []NameKind             `json:"kinds,omitempty"`
+		Limit     int                    `json:"limit,omitempty"`
+		Offset    int                    `json:"offset,omitempty"`
+		Strategy  searchcfg.StrategyName `json:"strategy,omitempty"`
+	}
+	var wire wireInput
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*input = SearchInput{
+		Query:             wire.Query,
+		Scope:             wire.Scope,
+		Kinds:             wire.Kinds,
+		Limit:             wire.Limit,
+		Offset:            wire.Offset,
+		Strategy:          wire.Strategy,
+		FuzzyOverride:     wire.Fuzzy,
+		ThresholdOverride: wire.Threshold,
+	}
+	if wire.Fuzzy != nil {
+		input.Fuzzy = *wire.Fuzzy
+	}
+	if wire.Threshold != nil {
+		input.Threshold = *wire.Threshold
+	}
+	return nil
 }
 
 func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
@@ -69,6 +115,25 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 	if input.Query == "" {
 		return input, fmt.Errorf("search query is required")
 	}
+
+	overrides := searchcfg.Overrides{
+		Fuzzy:     input.FuzzyOverride,
+		Threshold: input.ThresholdOverride,
+	}
+	if input.Fuzzy && overrides.Fuzzy == nil {
+		overrides.Fuzzy = &input.Fuzzy
+	}
+	if input.Threshold > 0 && overrides.Threshold == nil {
+		overrides.Threshold = &input.Threshold
+	}
+	strategy, err := searchcfg.ResolveStrategy(input.Strategy, overrides)
+	if err != nil {
+		return input, err
+	}
+	input.Strategy = strategy.Name
+	input.Fuzzy = strategy.Fuzzy
+	input.Threshold = strategy.Threshold
+	input.StrategyConfig = strategy
 
 	if input.Scope == "" {
 		input.Scope = SearchScopeAll
@@ -84,6 +149,15 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 	}
 	if input.Threshold > 1 {
 		input.Threshold = 1
+	}
+	input.StrategyConfig.Threshold = input.Threshold
+	for i := range input.StrategyConfig.Matchers {
+		if input.StrategyConfig.Matchers[i].Threshold > 0 {
+			input.StrategyConfig.Matchers[i].Threshold = input.Threshold
+		}
+		if strings.HasPrefix(string(input.StrategyConfig.Matchers[i].Name), "fuzzy-") {
+			input.StrategyConfig.Matchers[i].Enabled = input.Fuzzy
+		}
 	}
 	if input.Limit <= 0 {
 		input.Limit = 20
@@ -101,4 +175,42 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 		}
 	}
 	return input, nil
+}
+
+func SearchResponseProvenance(input SearchInput) *searchcfg.ResponseProvenance {
+	var overrides *searchcfg.RequestOverrides
+	if input.FuzzyOverride != nil || input.ThresholdOverride != nil {
+		overrides = &searchcfg.RequestOverrides{Fuzzy: input.FuzzyOverride, Threshold: input.ThresholdOverride}
+	}
+	return &searchcfg.ResponseProvenance{
+		Strategy:  input.Strategy,
+		Fuzzy:     input.Fuzzy,
+		Threshold: input.Threshold,
+		Matchers:  input.StrategyConfig.Matchers,
+		Overrides: overrides,
+	}
+}
+
+func SearchResultProvenance(input SearchInput, result SearchResult) *searchcfg.ResultProvenance {
+	matcherName := SearchMatcherName(result)
+	matcher, _ := searchcfg.MatcherByName(input.StrategyConfig, matcherName)
+	return &searchcfg.ResultProvenance{Strategy: input.Strategy, Matcher: matcherName, Weight: matcher.Weight}
+}
+
+func SearchMatcherName(result SearchResult) searchcfg.MatcherName {
+	switch result.MatchType {
+	case SearchMatchExact:
+		return searchcfg.MatcherExact
+	case SearchMatchPrefix:
+		return searchcfg.MatcherPrefix
+	case SearchMatchFTS:
+		return searchcfg.MatcherFullText
+	case SearchMatchFuzzy:
+		if result.MatchedVia == "name" || result.MatchedName != nil {
+			return searchcfg.MatcherFuzzyName
+		}
+		return searchcfg.MatcherFuzzyBody
+	default:
+		return searchcfg.MatcherName(result.MatchType)
+	}
 }

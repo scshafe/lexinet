@@ -851,13 +851,28 @@ func searchHandler(store Store) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		threshold, ok := queryFloat(w, r, "threshold", 0.3)
+		threshold, thresholdSet, ok := queryFloatOptional(w, r, "threshold")
 		if !ok {
 			return
 		}
-		fuzzy, ok := queryBool(w, r, "fuzzy", false)
+		fuzzy, fuzzySet, ok := queryBoolOptional(w, r, "fuzzy")
 		if !ok {
 			return
+		}
+		input := model.SearchInput{
+			Query:     r.URL.Query().Get("q"),
+			Scope:     model.SearchScope(r.URL.Query().Get("scope")),
+			Fuzzy:     fuzzy,
+			Threshold: threshold,
+			Strategy:  searchStrategy(r),
+			Limit:     limit,
+			Offset:    offset,
+		}
+		if fuzzySet {
+			input.FuzzyOverride = &input.Fuzzy
+		}
+		if thresholdSet {
+			input.ThresholdOverride = &input.Threshold
 		}
 		kinds := make([]model.NameKind, 0)
 		for _, value := range r.URL.Query()["kind"] {
@@ -868,21 +883,18 @@ func searchHandler(store Store) http.HandlerFunc {
 				}
 			}
 		}
-		response, err := store.Search(r.Context(), model.SearchInput{
-			Query:     r.URL.Query().Get("q"),
-			Scope:     model.SearchScope(r.URL.Query().Get("scope")),
-			Fuzzy:     fuzzy,
-			Threshold: threshold,
-			Kinds:     kinds,
-			Limit:     limit,
-			Offset:    offset,
-		})
+		input.Kinds = kinds
+		response, err := store.Search(r.Context(), input)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+func searchStrategy(r *http.Request) model.SearchStrategyName {
+	return model.SearchStrategyName(strings.TrimSpace(r.URL.Query().Get("strategy")))
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
@@ -935,6 +947,19 @@ func queryFloat(w http.ResponseWriter, r *http.Request, key string, fallback flo
 	return parsed, true
 }
 
+func queryFloatOptional(w http.ResponseWriter, r *http.Request, key string) (float64, bool, bool) {
+	value, ok := firstQueryValue(r, key)
+	if !ok {
+		return 0, false, true
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid "+key)
+		return 0, false, false
+	}
+	return parsed, true, true
+}
+
 func queryBool(w http.ResponseWriter, r *http.Request, key string, fallback bool) (bool, bool) {
 	value := r.URL.Query().Get(key)
 	if value == "" {
@@ -946,6 +971,27 @@ func queryBool(w http.ResponseWriter, r *http.Request, key string, fallback bool
 		return false, false
 	}
 	return parsed, true
+}
+
+func queryBoolOptional(w http.ResponseWriter, r *http.Request, key string) (bool, bool, bool) {
+	value, ok := firstQueryValue(r, key)
+	if !ok {
+		return false, false, true
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid "+key)
+		return false, false, false
+	}
+	return parsed, true, true
+}
+
+func firstQueryValue(r *http.Request, key string) (string, bool) {
+	values, ok := r.URL.Query()[key]
+	if !ok || len(values) == 0 {
+		return "", false
+	}
+	return values[0], true
 }
 
 func relationKindQuery(w http.ResponseWriter, r *http.Request) (*model.RelationKind, bool) {

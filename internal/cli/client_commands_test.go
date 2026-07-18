@@ -423,6 +423,28 @@ func TestClientHTTPErrorExitCodeMapping(t *testing.T) {
 	}
 }
 
+func TestSearchCommandSendsStrategyAndExplicitFuzzyOverride(t *testing.T) {
+	setupClientConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("q") != "redos" || query.Get("strategy") != "legacy" || query.Get("fuzzy") != "false" || query.Get("threshold") != "0.45" {
+			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"query":"redos","results":[]}`))
+	}))
+	defer server.Close()
+
+	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "search", "redos", "--strategy", "legacy", "--no-fuzzy", "--threshold", "0.45"}, nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+}
+
 func executeTestCommand(t *testing.T, args []string, stdin *strings.Reader) (string, string, error) {
 	t.Helper()
 	opts := &Options{}
