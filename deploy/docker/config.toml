@@ -4,7 +4,9 @@ token = ""
 token_file = ""
 
 [search]
-fuzzy = false
+# No legacy `fuzzy` override here: the daily-driver default strategy governs
+# (fuzzy on, threshold 0.3). Tune via default_strategy / [search.strategies.*].
+default_strategy = "daily-driver"
 default_limit = 20
 
 [display]
