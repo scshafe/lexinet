@@ -43,7 +43,9 @@ cd clients/macos
 swift run LexinetMenuBar
 ```
 
-Click the `Lexinet` menu-bar item, type a term, and press Return or click Search. When the service is unavailable, the popover displays a start hint: `lexinet serve --tailnet off`.
+Click the `Lexinet` menu-bar item, type a term, and press Return or click Search. The app sends `q`, `limit`, and `scope=all` only; it deliberately omits `strategy`, `fuzzy`, and `threshold` so lookup behavior follows the server's configured default search strategy. When the service is unavailable, the popover displays a start hint: `lexinet serve --tailnet off`.
+
+Search strategy changes are service-side. After changing `search.default_strategy` or `search.strategies.*` in the lexinet config, restart `lexinet serve`; the running service does not hot reload strategy config, and the menu-bar binary does not need rebuilding.
 
 ## Capture Flow
 
@@ -126,11 +128,12 @@ Sandbox verification cannot launch the macOS menu-bar UI. On Apple Silicon, veri
 2. `swift run LexinetMenuBar` starts a `Lexinet` menu-bar item.
 3. Clicking the menu-bar item opens the popover.
 4. Searching a known term returns an idea and shows names plus definition.
-5. Topic and acronym-link summaries appear for ideas whose HTTP responses include `topics` and `acronym_links`.
-6. Stopping the service and searching again shows the service-unavailable state with the start hint.
-7. Clicking `+` opens capture mode and `Submit to Agent` remains disabled for an empty or whitespace-only idea.
-8. Entering an idea and context, then clicking `Submit to Agent`, queues a pending submission and returns to search after the success confirmation.
-9. Stopping the service, entering capture text, and clicking `Submit to Agent` shows an inline service error without clearing the typed text.
-10. `Submit (direct add later)` is visible and disabled; no direct idea write is available from the app.
+5. Searching a misspelled daily-driver query, for example `redos` with a `Redis` idea in the service, returns the intended idea without any app-side strategy parameters.
+6. Topic and acronym-link summaries appear for ideas whose HTTP responses include `topics` and `acronym_links`.
+7. Stopping the service and searching again shows the service-unavailable state with the start hint.
+8. Clicking `+` opens capture mode and `Submit to Agent` remains disabled for an empty or whitespace-only idea.
+9. Entering an idea and context, then clicking `Submit to Agent`, queues a pending submission and returns to search after the success confirmation.
+10. Stopping the service, entering capture text, and clicking `Submit to Agent` shows an inline service error without clearing the typed text.
+11. `Submit (direct add later)` is visible and disabled; no direct idea write is available from the app.
 
 The host DB integration check is operator-verified: after a successful capture, `lexinet submission list --status pending --json` must show the queued term in the same Postgres-backed service used by the menu-bar app.

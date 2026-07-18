@@ -17,7 +17,7 @@ The project ships as one Go 1.23.4 binary named `lexinet`:
 - Durable capture submissions for later agent enrichment.
 - Child bodies for definitions, examples, and notes.
 - Typed relationship graph with forward/reverse labels and bounded traversal.
-- Exact, prefix, full-text, and opt-in trigram fuzzy search.
+- Configurable exact, prefix, full-text, and trigram fuzzy search strategies.
 - Optional native macOS menu-bar lookup helper in `clients/macos`.
 - Agent-friendly CLI with `--json`, typed exit codes, stdin body support, and non-interactive destructive guards.
 - Optional bearer auth for service routes other than `/healthz` and `/version`.
@@ -56,6 +56,67 @@ tailnet_enabled = false
 [service.database]
 dsn = "postgres://lexinet@127.0.0.1:5432/lexinet?sslmode=disable"
 ```
+
+### Search Strategy Configuration
+
+Search runs through a named server-side strategy. The built-in default is `daily-driver`, which enables exact, prefix, full-text, fuzzy name, and fuzzy body matchers so menu-bar searches get typo tolerance without a client rebuild. `legacy` preserves the older default where fuzzy matchers are disabled unless the request opts in.
+
+Config shape:
+
+```toml
+[search]
+default_limit = 20
+default_strategy = "daily-driver"
+
+[search.strategies.daily-driver]
+fuzzy = true
+threshold = 0.3
+
+[[search.strategies.daily-driver.matchers]]
+name = "exact"
+enabled = true
+weight = 1.0
+priority = 0
+
+[[search.strategies.daily-driver.matchers]]
+name = "prefix"
+enabled = true
+weight = 0.8
+priority = 1
+
+[[search.strategies.daily-driver.matchers]]
+name = "full-text"
+enabled = true
+weight = 0.6
+priority = 2
+
+[[search.strategies.daily-driver.matchers]]
+name = "fuzzy-name"
+enabled = true
+weight = 0.5
+threshold = 0.3
+priority = 3
+
+[[search.strategies.daily-driver.matchers]]
+name = "fuzzy-body"
+enabled = true
+weight = 0.3
+threshold = 0.3
+priority = 4
+```
+
+Matcher names are `exact`, `prefix`, `full-text`, `fuzzy-name`, and `fuzzy-body`. Lower `priority` sorts ahead when scores tie closely enough, so exact and prefix results rank ahead of fuzzy candidates in the shipped strategy. Partial strategy definitions are merged with the built-ins: omitted built-in matchers keep their default weight, threshold, and priority.
+
+Compatibility mapping:
+
+- `GET /search?q=...` and `lexinet search <q>` use `search.default_strategy`, which defaults to `daily-driver`.
+- `strategy=legacy` or `lexinet search <q> --strategy legacy` selects the legacy config with fuzzy disabled.
+- Existing `fuzzy=true|false`, `--fuzzy`, and `--no-fuzzy` are per-request overrides of the selected strategy's fuzzy behavior.
+- Existing `threshold`, `--threshold`, and `--min-score` are per-request overrides for the selected strategy's fuzzy thresholds.
+- Existing `scope`, `kind`, `limit`, and `offset` keep their previous request semantics.
+- Responses include top-level `strategy` plus `provenance` for the effective strategy and per-result `matcher`/`provenance`, so HTTP and CLI callers can see which matcher produced each hit.
+
+Config reload behavior: `lexinet serve` loads the config when the process starts. Changing `search.default_strategy` or any `search.strategies.*` value requires restarting `lexinet serve`; there is no hot reload watcher. Clients do not need rebuilding because the menu-bar app sends no strategy/fuzzy/threshold parameters by default and therefore follows the restarted server's default strategy.
 
 ## Run Locally
 

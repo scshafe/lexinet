@@ -12,7 +12,7 @@ lexinet must:
 
 1. Make the **idea** the root entity and resolve **any** of its names to it.
 2. Connect ideas via a **typed, directed relationship graph** with ergonomic reverse traversal.
-3. Provide **powerful search** over names AND definitions/examples/notes, defaulting to exact/prefix/full-text, with **fuzzy as an opt-in mode**.
+3. Provide **powerful search** over names AND definitions/examples/notes through configurable server-side strategies, with the daily-driver default enabling fuzzy typo recall and a legacy strategy preserving fuzzy opt-in behavior.
 4. Expose a **network endpoint** (HTTP) AND ship a **scriptable, JSON-first CLI** built for agents (non-interactive, structured output, typed exit codes).
 
 It is delivered as a **single Go 1.23.x binary** that is both the HTTP service (`lexinet serve`) and the client (every other command), following the proven **loose_ends** pattern verbatim where possible.
@@ -223,7 +223,7 @@ The three facets proposed overlapping enums. The **stored** set is the eight TEX
 
 ## 5. Search — `0004_search.up.sql`
 
-Two complementary Postgres mechanisms (tsvector for text, pg_trgm for fuzzy), satisfying "full-text over names AND definitions/examples/notes, with fuzzy OPTIONAL."
+Two complementary Postgres mechanisms (tsvector for text, pg_trgm for fuzzy) back named server-side strategies. The current daily-driver default runs exact, prefix, full-text, fuzzy-name, and fuzzy-body matchers; `legacy` keeps fuzzy disabled unless a request opts in.
 
 ### Index strategy (reconciled to child tables)
 Because definitions/examples/notes are child tables, a single cross-table `GENERATED` column is impossible. Instead maintain a **per-idea weighted `tsvector`** column populated by triggers:
@@ -247,7 +247,7 @@ Triggers on `INSERT/UPDATE/DELETE` of `names`, `definitions`, `examples`, `notes
 Trigram (fuzzy + prefix/substring):
 ```sql
 CREATE INDEX names_text_trgm ON names USING GIN (text gin_trgm_ops);
--- optional, larger; only used when scope=all + fuzzy=true:
+-- only used when scope=all and the effective strategy enables fuzzy-body:
 CREATE INDEX definitions_body_trgm ON definitions USING GIN (body gin_trgm_ops);
 ```
 
@@ -257,17 +257,63 @@ CREATE INDEX definitions_body_trgm ON definitions USING GIN (body gin_trgm_ops);
 | **exact** (default) | always | `names.text = lower(q)` | 1.00 (canonical +0.0, alias −0.05, deprecated −0.15) |
 | **prefix** (default) | always | `names.text LIKE lower(q)||'%'` | 0.80 × len(q)/len(name) |
 | **fts** (default when `scope=all`) | text search | `search_doc @@ websearch_to_tsquery('english', q)` | 0.60 × normalized `ts_rank_cd` |
-| **fuzzy** (opt-in `fuzzy=true`) | typo/approx | `names.text % q` (+`definitions.body % q` when `scope=all`) | 0.50 × `similarity(name)` / 0.30 × `similarity(body)` |
+| **fuzzy** (strategy-enabled or `fuzzy=true`) | typo/approx | `names.text % q` (+`definitions.body % q` when `scope=all`) | 0.50 × `similarity(name)` / 0.30 × `similarity(body)` |
 
-Default = exact + prefix (+ FTS when `scope=all`). **Fuzzy is strictly opt-in.** Results dedupe to **one row per resolved idea** (best matching field wins) and carry *why* they matched. Tie-break: canonical match → `is_primary` → `updated_at desc`. **Deprecated-name hits resolve the LIVE idea** (the whole point), de-prioritized, with `matched_name_type='deprecated'`. `ts_headline` produces snippets for text matches.
+Default strategy = `daily-driver`: exact + prefix + FTS when `scope=all` + fuzzy-name + fuzzy-body. Legacy strategy = exact + prefix + FTS, with fuzzy disabled unless `fuzzy=true` overrides it for that request. Results dedupe to **one row per resolved idea** (best matching field wins) and carry *why* they matched. Ranking uses matcher weights and priorities so exact and prefix hits outrank fuzzy candidates in the shipped daily-driver strategy. Tie-break: canonical match → `is_primary` → `updated_at desc`. **Deprecated-name hits resolve the LIVE idea** (the whole point), de-prioritized, with `matched_name_type='deprecated'`. `ts_headline` produces snippets for text matches.
+
+### Strategy config shape
+```toml
+[search]
+default_strategy = "daily-driver"
+default_limit = 20
+
+[search.strategies.daily-driver]
+fuzzy = true
+threshold = 0.3
+
+[[search.strategies.daily-driver.matchers]]
+name = "exact"
+enabled = true
+weight = 1.0
+priority = 0
+
+[[search.strategies.daily-driver.matchers]]
+name = "prefix"
+enabled = true
+weight = 0.8
+priority = 1
+
+[[search.strategies.daily-driver.matchers]]
+name = "full-text"
+enabled = true
+weight = 0.6
+priority = 2
+
+[[search.strategies.daily-driver.matchers]]
+name = "fuzzy-name"
+enabled = true
+weight = 0.5
+threshold = 0.3
+priority = 3
+
+[[search.strategies.daily-driver.matchers]]
+name = "fuzzy-body"
+enabled = true
+weight = 0.3
+threshold = 0.3
+priority = 4
+```
+
+`lexinet serve` loads strategy config on process start. There is no hot reload; changing `search.default_strategy` or `search.strategies.*` requires restarting the service. Clients do not need rebuilding when the default changes.
 
 ### HTTP `GET /search` / CLI `lexinet search`
 | Param / flag | Default | Meaning |
 |---|---|---|
 | `q` / `<query>` (required) | — | search text (empty → `400 BAD_REQUEST`) |
-| `scope` / `--scope` | `names` | `names` \| `all` (include defs/examples/notes via FTS + optional fuzzy) |
-| `fuzzy` / `--fuzzy` | `false` | enable trigram fuzzy |
-| `threshold` / `--threshold` (`--min-score`) | `0.3` | min trigram similarity (fuzzy only) |
+| `strategy` / `--strategy` | `daily-driver` | named server-side strategy; built-ins are `daily-driver` and `legacy` |
+| `scope` / `--scope` | `all` | `names` \| `all` (include defs/examples/notes via FTS + enabled fuzzy-body) |
+| `fuzzy` / `--fuzzy` / `--no-fuzzy` | strategy default | per-request fuzzy override |
+| `threshold` / `--threshold` (`--min-score`) | strategy default (`0.3`) | per-request fuzzy threshold override |
 | `kind` / `--kind` (`--name-kind`, repeatable) | — | restrict matched name buckets |
 | `limit` / `--limit` | `20` (max `100`) | page size |
 | `offset` / `--offset` | `0` | pagination |
@@ -275,13 +321,15 @@ Default = exact + prefix (+ FTS when `scope=all`). **Fuzzy is strictly opt-in.**
 Result shape (one row per idea):
 ```json
 {
-  "query": "in-memory cache", "scope": "all", "fuzzy": true,
+  "query": "in-memory cache", "scope": "all", "fuzzy": true, "strategy": "daily-driver",
   "total": 2, "limit": 20, "offset": 0,
+  "provenance": { "strategy": "daily-driver", "fuzzy": true, "threshold": 0.3, "matchers": [] },
   "results": [
     { "idea": { "id": "9b2c..", "slug": "redis", "canonical_name": "Redis", "summary": "An in-memory key-value store..." },
       "score": 0.71, "matched_via": "name", "matched_field": "canonical_name",
       "matched_name": "Redis", "matched_name_type": "canonical", "match_type": "exact",
-      "similarity": null, "headline": null }
+      "matcher": "exact", "similarity": null, "headline": null,
+      "provenance": { "strategy": "daily-driver", "matcher": "exact", "weight": 1.0, "priority": 0 } }
   ]
 }
 ```
@@ -348,7 +396,7 @@ GET    /ideas/{ref}/graph?depth=1..5&kind&direction=out|in|both    bounded, cycl
 
 ### Search
 ```
-GET /search?q=...&scope&fuzzy&threshold&kind&limit&offset
+GET /search?q=...&strategy&scope&fuzzy&threshold&kind&limit&offset
 ```
 
 ### Error codes
@@ -377,7 +425,7 @@ Form: `lexinet [global-flags] <group> <verb> [args] [flags]`. Every read & mutat
 - **`def`** — `add <idea-ref> <text|-> --kind definition|example|note [--source]`, `rm <id>`, `list <idea-ref> [--kind]`. `<text|->` reads stdin on `-` (`bodyFromFlag`).
 - **`link`** — `add <from-ref> <relation> <to-ref> [--note]` (idempotent), `rm`, `list <ref> [--relation --direction out|in|both]`. `<relation>` accepts base + virtual reverse names; unknown → exit 2 with the valid list.
 - **`traverse <ref>`** — `--relation` (repeatable), `--direction out|in|both`, `--depth` (max 6), `--format tree|edges|ids`, `--json`.
-- **`search "<q>"`** — `--fuzzy`, `--scope names|all`, `--name-kind`, `--threshold/--min-score`, `--limit`, `--json`/`--jsonl`.
+- **`search "<q>"`** — `--strategy daily-driver|legacy`, `--fuzzy`, `--no-fuzzy`, `--scope names|all`, `--name-kind`, `--threshold/--min-score`, `--limit`, `--json`/`--jsonl`.
 - **Plumbing** — `config show|set <key> <value>|path`, `serve [--bind --port --db --tailnet on|off --skip-migrate]`, `migrate [--db]`, `ping`, `version --json`.
 
 `<ref>` resolution priority: slug/UUID → exact name (any kind) → error `ambiguous_ref` listing candidates. `--by id|name` forces the mode.
@@ -389,8 +437,12 @@ url        = "http://127.0.0.1:17892"
 token      = ""                              # discouraged inline
 token_file = "~/.config/lexinet/token"       # PREFERRED 0600 file, read at call time
 [search]
-fuzzy = false
 default_limit = 20
+default_strategy = "daily-driver"
+
+[search.strategies.legacy]
+fuzzy = false
+threshold = 0.3
 [display]
 color = "auto"
 id_length = 12

@@ -1,6 +1,6 @@
 # lexinet v2 daily-driver manual acceptance
 
-This walkthrough verifies the topic, acronym-entry, TUI/Terminal User Interface, capture submission, and menu-bar workflows against a real Postgres-backed service. It is intentionally operator-run: the sandbox must not reach or mutate the host database.
+This walkthrough verifies the topic, acronym-entry, TUI/Terminal User Interface, capture submission, configurable search strategy, and menu-bar workflows against a real Postgres-backed service. It is intentionally operator-run: the sandbox must not reach or mutate the host database.
 
 ## Preconditions
 
@@ -141,6 +141,56 @@ curl -sS -X POST http://127.0.0.1:17892/submissions/88888888-8888-8888-8888-8888
 
 Expected result: completed submissions move to `status: "enriched"` with an `idea_id`; failed submissions move to `status: "failed"` with the note preserved. Host DB integration for these transitions is operator-verified because the sandbox must not connect to the host Postgres instance.
 
+## Search Strategy Workflow
+
+The daily-driver strategy is server-side config. The macOS client intentionally sends only `q`, `limit`, and `scope=all`; it does not send `strategy`, `fuzzy`, or `threshold`, so no Swift request change is required when the service default changes.
+
+Seed or confirm the target idea exists:
+
+```sh
+lexinet idea add "Redis" --slug redis --summary "In-memory data structure store" --json
+lexinet name add redis "Redis Serialization Protocol" --kind alias --json
+lexinet def add redis "Redis is an in-memory data structure server commonly used as a cache and message broker." --primary --json
+```
+
+Verify exact ranking above fuzzy recall over HTTP:
+
+```sh
+curl -sS 'http://127.0.0.1:17892/search?q=redis&scope=all&limit=5' | jq '{strategy, provenance, results: [.results[] | {name: .idea.canonical_name, match_type, matcher, score, provenance}]}'
+curl -sS 'http://127.0.0.1:17892/search?q=redos&scope=all&limit=5' | jq '{strategy, provenance, results: [.results[] | {name: .idea.canonical_name, match_type, matcher, score, provenance}]}'
+```
+
+Expected result: the exact `redis` query returns `Redis` first with `match_type: "exact"` and `matcher: "exact"`; the misspelled `redos` query still returns `Redis` through a fuzzy matcher. The response includes top-level `strategy: "daily-driver"`, response `provenance`, and per-result `provenance`.
+
+Verify the compatibility mapping over HTTP:
+
+```sh
+curl -sS 'http://127.0.0.1:17892/search?q=redos&strategy=legacy&scope=all&limit=5' | jq '{strategy, fuzzy, total, results: [.results[] | {name: .idea.canonical_name, match_type, matcher}]}'
+curl -sS 'http://127.0.0.1:17892/search?q=redos&strategy=legacy&fuzzy=true&threshold=0.3&scope=all&limit=5' | jq '{strategy, fuzzy, provenance, results: [.results[] | {name: .idea.canonical_name, match_type, matcher, provenance}]}'
+```
+
+Expected result: `strategy=legacy` keeps fuzzy disabled by default, while `fuzzy=true` and `threshold=0.3` override the selected legacy strategy for that request.
+
+Verify CLI provenance visibility:
+
+```sh
+lexinet search redis --json | jq '{strategy, provenance, first: .results[0] | {name: .idea.canonical_name, match_type, matcher, provenance}}'
+lexinet search redos --json | jq '{strategy, provenance, first: .results[0] | {name: .idea.canonical_name, match_type, matcher, provenance}}'
+lexinet search redos --strategy legacy --no-fuzzy --json | jq '{strategy, fuzzy, total}'
+lexinet search redos --strategy legacy --fuzzy --threshold 0.3 --json | jq '{strategy, fuzzy, provenance, first: .results[0] | {name: .idea.canonical_name, match_type, matcher, provenance}}'
+```
+
+Expected result: CLI JSON exposes the same top-level strategy/provenance and per-hit matcher/provenance fields as HTTP. JSONL mode remains result-only by design, so use `--json` for strategy-level provenance.
+
+Verify menu-bar default behavior on macOS:
+
+```sh
+cd clients/macos
+swift run LexinetMenuBar
+```
+
+Expected result: searching `redos` from the menu-bar popover returns the `Redis` idea without adding Swift request parameters or rebuilding after a server-only strategy config change. If `search.default_strategy` or `search.strategies.*` is changed in the config, restart `lexinet serve`; the running service does not hot reload strategy config.
+
 ## macOS Menu-Bar Workflow
 
 Run on macOS with Swift available:
@@ -158,6 +208,7 @@ Acceptance checks:
 - A `Lexinet` item appears in the macOS menu bar.
 - Searching `TUI` returns the standalone TUI entry and displays names, definition text when present, topic summaries, and acronym-link summaries.
 - Searching `Terminal User Interface` returns the expansion entry and displays the reverse acronym link.
+- Searching a misspelled daily-driver query such as `redos` returns the intended `Redis` idea using the server default strategy; no Swift request change is required.
 - Stopping `lexinet serve` and searching again shows the service-unavailable hint instead of terminating the menu-bar process.
 - Clicking `+` opens capture mode; `Submit to Agent` stays disabled until the idea field contains non-whitespace text.
 - Submitting a term queues it, shows `Queued for enrichment`, and returns to search; the queued row is visible through `lexinet submission list --status pending --json` against the host service.
@@ -189,6 +240,27 @@ cd clients/macos && swift test
 ```
 
 If `swift` is not installed in the sandbox, record macOS build/test/menu-bar launch verification as the operator gate above instead of bypassing with host mutations. Host DB integration for submission create/list/complete/fail is operator-verified; the sandbox verification is limited to Go tests/vet/build and Swift package checks when the toolchain exists.
+
+For the search strategy closeout slice, also run:
+
+```sh
+mkdir -p /workspace/.gotmp-build /workspace/.gotmp-vet /workspace/.gotmp-test /workspace/.go-cache
+GOTMPDIR=/workspace/.gotmp-build GOCACHE=/workspace/.go-cache go build ./...
+GOTMPDIR=/workspace/.gotmp-vet GOCACHE=/workspace/.go-cache go vet ./...
+GOTMPDIR=/workspace/.gotmp-test GOCACHE=/workspace/.go-cache go test ./...
+cd clients/macos && swift build
+cd clients/macos && swift test
+```
+
+If `swift` is unavailable, record the exact `swift --version` failure and leave menu-bar launch/typo-recall validation as the host Apple-device gate above.
+
+2026-07-18 sandbox result for the search strategy closeout slice:
+
+- `GOTMPDIR=/workspace/.gotmp-build GOCACHE=/workspace/.go-cache go build ./...` passed.
+- `GOTMPDIR=/workspace/.gotmp-vet GOCACHE=/workspace/.go-cache go vet ./...` passed.
+- `GOTMPDIR=/workspace/.gotmp-test GOCACHE=/workspace/.go-cache go test ./...` passed.
+- `swift build` and `swift test` were not run because `swift --version` failed with `/usr/bin/bash: line 1: swift: command not found` in this Linux sandbox.
+- Host DB search acceptance remains operator-run against the real Postgres-backed service using the Search Strategy Workflow above; it covers exact `redis` ranking above fuzzy candidates, misspelled `redos` recall through the menu-bar default request shape, and strategy/provenance visibility through HTTP and CLI JSON.
 
 2026-07-18 sandbox result for the docs/version submissions slice:
 
