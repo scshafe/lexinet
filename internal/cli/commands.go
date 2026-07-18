@@ -140,13 +140,14 @@ func newServeCommand(opts *Options) *cobra.Command {
 			defer stop()
 			fmt.Fprintf(cmd.ErrOrStderr(), "serving loopback on %s\n", cfg.Service.ListenLoopback)
 			return server.Serve(ctx, server.Config{
-				Version:         opts.Version,
-				ListenLoopback:  cfg.Service.ListenLoopback,
-				AuthToken:       cfg.Service.AuthToken,
-				DatabaseDSN:     cfg.Service.Database.DSN,
-				TailnetEnabled:  cfg.Service.TailnetEnabled,
-				TailnetHostname: cfg.Service.TailnetHostname,
-				TailnetStateDir: cfg.Service.TailnetStateDir,
+				Version:          opts.Version,
+				ListenLoopback:   cfg.Service.ListenLoopback,
+				AuthToken:        cfg.Service.AuthToken,
+				DatabaseDSN:      cfg.Service.Database.DSN,
+				SearchStrategies: cfg.Search.StrategyProvider(),
+				TailnetEnabled:   cfg.Service.TailnetEnabled,
+				TailnetHostname:  cfg.Service.TailnetHostname,
+				TailnetStateDir:  cfg.Service.TailnetStateDir,
 			})
 		},
 	}

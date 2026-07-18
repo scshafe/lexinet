@@ -111,9 +111,17 @@ func (input *SearchInput) UnmarshalJSON(data []byte) error {
 }
 
 func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
+	return NormalizeSearchInputWithProvider(input, nil)
+}
+
+func NormalizeSearchInputWithProvider(input SearchInput, provider searchcfg.StrategyProvider) (SearchInput, error) {
 	input.Query = strings.TrimSpace(input.Query)
 	if input.Query == "" {
 		return input, fmt.Errorf("search query is required")
+	}
+	if provider == nil {
+		builtin := searchcfg.BuiltinProvider()
+		provider = builtin
 	}
 
 	overrides := searchcfg.Overrides{
@@ -126,7 +134,7 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 	if input.Threshold > 0 && overrides.Threshold == nil {
 		overrides.Threshold = &input.Threshold
 	}
-	strategy, err := searchcfg.ResolveStrategy(input.Strategy, overrides)
+	strategy, err := provider.ResolveStrategy(input.Strategy, overrides)
 	if err != nil {
 		return input, err
 	}
@@ -144,6 +152,7 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 		return input, fmt.Errorf("invalid search scope %q", input.Scope)
 	}
 
+	thresholdOverridden := input.ThresholdOverride != nil || overrides.Threshold != nil
 	if input.Threshold <= 0 {
 		input.Threshold = 0.3
 	}
@@ -152,15 +161,21 @@ func NormalizeSearchInput(input SearchInput) (SearchInput, error) {
 	}
 	input.StrategyConfig.Threshold = input.Threshold
 	for i := range input.StrategyConfig.Matchers {
-		if input.StrategyConfig.Matchers[i].Threshold > 0 {
+		if thresholdOverridden && input.StrategyConfig.Matchers[i].Threshold > 0 {
+			input.StrategyConfig.Matchers[i].Threshold = input.Threshold
+		} else if input.StrategyConfig.Matchers[i].Threshold <= 0 && strings.HasPrefix(string(input.StrategyConfig.Matchers[i].Name), "fuzzy-") {
 			input.StrategyConfig.Matchers[i].Threshold = input.Threshold
 		}
 		if strings.HasPrefix(string(input.StrategyConfig.Matchers[i].Name), "fuzzy-") {
-			input.StrategyConfig.Matchers[i].Enabled = input.Fuzzy
+			if !input.Fuzzy {
+				input.StrategyConfig.Matchers[i].Enabled = false
+			} else if input.FuzzyOverride != nil && *input.FuzzyOverride {
+				input.StrategyConfig.Matchers[i].Enabled = true
+			}
 		}
 	}
 	if input.Limit <= 0 {
-		input.Limit = 20
+		input.Limit = provider.DefaultLimit()
 	}
 	if input.Limit > 100 {
 		input.Limit = 100
@@ -194,7 +209,7 @@ func SearchResponseProvenance(input SearchInput) *searchcfg.ResponseProvenance {
 func SearchResultProvenance(input SearchInput, result SearchResult) *searchcfg.ResultProvenance {
 	matcherName := SearchMatcherName(result)
 	matcher, _ := searchcfg.MatcherByName(input.StrategyConfig, matcherName)
-	return &searchcfg.ResultProvenance{Strategy: input.Strategy, Matcher: matcherName, Weight: matcher.Weight}
+	return &searchcfg.ResultProvenance{Strategy: input.Strategy, Matcher: matcherName, Weight: matcher.Weight, Priority: matcher.Priority}
 }
 
 func SearchMatcherName(result SearchResult) searchcfg.MatcherName {

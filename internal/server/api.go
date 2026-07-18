@@ -843,7 +843,7 @@ func failSubmissionHandler(store Store) http.HandlerFunc {
 
 func searchHandler(store Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		limit, ok := queryInt(w, r, "limit", 20)
+		limit, ok := queryInt(w, r, "limit", 0)
 		if !ok {
 			return
 		}

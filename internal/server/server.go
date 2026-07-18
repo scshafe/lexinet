@@ -15,18 +15,20 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	searchcfg "lexinet/internal/search"
 	"lexinet/internal/storage"
 	"lexinet/internal/tailnet"
 )
 
 type Config struct {
-	Version         string
-	ListenLoopback  string
-	AuthToken       string
-	DatabaseDSN     string
-	TailnetEnabled  bool
-	TailnetHostname string
-	TailnetStateDir string
+	Version          string
+	ListenLoopback   string
+	AuthToken        string
+	DatabaseDSN      string
+	SearchStrategies searchcfg.StrategyProvider
+	TailnetEnabled   bool
+	TailnetHostname  string
+	TailnetStateDir  string
 }
 
 type ErrorEnvelope struct {
@@ -79,7 +81,7 @@ func Serve(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer pool.Close()
-	handler := Router(cfg, storage.NewRepository(pool))
+	handler := Router(cfg, storage.NewRepository(pool, storage.WithSearchStrategyProvider(cfg.SearchStrategies)))
 	loopback := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	loopbackLn, err := net.Listen("tcp", cfg.ListenLoopback)
 	if err != nil {

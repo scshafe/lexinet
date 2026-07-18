@@ -42,6 +42,31 @@ func TestNormalizeSearchInputLegacyDefaultsToFuzzyOff(t *testing.T) {
 	}
 }
 
+func TestNormalizeSearchInputUsesStrategyProviderDefaults(t *testing.T) {
+	provider := searchcfg.NewStaticProvider(searchcfg.StrategyLegacy, map[searchcfg.StrategyName]searchcfg.Strategy{
+		searchcfg.StrategyLegacy: {
+			Name:      searchcfg.StrategyLegacy,
+			Fuzzy:     false,
+			Threshold: 0.45,
+			Matchers: []searchcfg.MatcherConfig{
+				{Name: searchcfg.MatcherExact, Enabled: true, Weight: 0.9, Priority: 4},
+				{Name: searchcfg.MatcherFuzzyName, Enabled: false, Weight: 0.2, Threshold: 0.45, Priority: 9},
+			},
+		},
+	}, 7)
+	input, err := NormalizeSearchInputWithProvider(SearchInput{Query: "cache"}, provider)
+	if err != nil {
+		t.Fatalf("normalize with provider: %v", err)
+	}
+	if input.Strategy != searchcfg.StrategyLegacy || input.Fuzzy || input.Threshold != 0.45 || input.Limit != 7 {
+		t.Fatalf("unexpected provider defaults: %#v", input)
+	}
+	matcher, ok := searchcfg.MatcherByName(input.StrategyConfig, searchcfg.MatcherExact)
+	if !ok || matcher.Weight != 0.9 || matcher.Priority != 4 {
+		t.Fatalf("exact matcher = %#v, ok=%v", matcher, ok)
+	}
+}
+
 func TestNormalizeSearchInputRejectsUnknownStrategy(t *testing.T) {
 	if _, err := NormalizeSearchInput(SearchInput{Query: "rest", Strategy: "experimental"}); err == nil {
 		t.Fatalf("expected invalid strategy error")
@@ -86,6 +111,10 @@ func TestNormalizeSearchInputDistinguishesFuzzyOverride(t *testing.T) {
 	}
 	if !explicitTrue.Fuzzy {
 		t.Fatalf("explicit fuzzy=true should override legacy fuzzy default")
+	}
+	matcher, ok := searchcfg.MatcherByName(explicitTrue.StrategyConfig, searchcfg.MatcherFuzzyName)
+	if !ok || !matcher.Enabled {
+		t.Fatalf("explicit fuzzy=true should enable fuzzy matcher, got %#v", matcher)
 	}
 }
 

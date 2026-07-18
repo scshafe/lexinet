@@ -7,13 +7,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"lexinet/internal/model"
+	searchcfg "lexinet/internal/search"
 )
 
 func (r *Repository) Search(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
-	input, err := model.NormalizeSearchInput(input)
+	input, err := model.NormalizeSearchInputWithProvider(input, r.searchStrategies)
 	if err != nil {
 		return nil, err
 	}
+	exact := matcherConfig(input.StrategyConfig, searchcfg.MatcherExact)
+	prefix := matcherConfig(input.StrategyConfig, searchcfg.MatcherPrefix)
+	fullText := matcherConfig(input.StrategyConfig, searchcfg.MatcherFullText)
+	fuzzyName := matcherConfig(input.StrategyConfig, searchcfg.MatcherFuzzyName)
+	fuzzyBody := matcherConfig(input.StrategyConfig, searchcfg.MatcherFuzzyBody)
 
 	nameKinds := make([]string, 0, len(input.Kinds))
 	for _, kind := range input.Kinds {
@@ -28,6 +34,23 @@ func (r *Repository) Search(ctx context.Context, input model.SearchInput) (*mode
 		input.Limit,
 		input.Offset,
 		nameKinds,
+		exact.Enabled,
+		exact.Weight,
+		exact.Priority,
+		prefix.Enabled,
+		prefix.Weight,
+		prefix.Priority,
+		fullText.Enabled,
+		fullText.Weight,
+		fullText.Priority,
+		fuzzyName.Enabled,
+		fuzzyName.Weight,
+		fuzzyName.Priority,
+		fuzzyBody.Enabled,
+		fuzzyBody.Weight,
+		fuzzyBody.Priority,
+		fuzzyThreshold(fuzzyName, input.Threshold),
+		fuzzyThreshold(fuzzyBody, input.Threshold),
 	)
 	if err != nil {
 		return nil, err
@@ -60,6 +83,21 @@ func (r *Repository) Search(ctx context.Context, input model.SearchInput) (*mode
 		return nil, err
 	}
 	return response, nil
+}
+
+func matcherConfig(strategy searchcfg.Strategy, name searchcfg.MatcherName) searchcfg.MatcherConfig {
+	matcher, ok := searchcfg.MatcherByName(strategy, name)
+	if ok {
+		return matcher
+	}
+	return searchcfg.MatcherConfig{Name: name}
+}
+
+func fuzzyThreshold(matcher searchcfg.MatcherConfig, fallback float64) float64 {
+	if matcher.Threshold > 0 {
+		return matcher.Threshold
+	}
+	return fallback
 }
 
 func scanSearchResult(row pgx.Row) (*model.SearchResult, int, error) {
@@ -110,6 +148,23 @@ WITH params AS (
         $3::boolean AS fuzzy,
         $4::double precision AS threshold,
         CASE WHEN cardinality($7::text[]) = 0 THEN NULL ELSE $7::text[] END AS kinds,
+        $8::boolean AS exact_enabled,
+        $9::double precision AS exact_weight,
+        $10::integer AS exact_priority,
+        $11::boolean AS prefix_enabled,
+        $12::double precision AS prefix_weight,
+        $13::integer AS prefix_priority,
+        $14::boolean AS fts_enabled,
+        $15::double precision AS fts_weight,
+        $16::integer AS fts_priority,
+        $17::boolean AS fuzzy_name_enabled,
+        $18::double precision AS fuzzy_name_weight,
+        $19::integer AS fuzzy_name_priority,
+        $20::boolean AS fuzzy_body_enabled,
+        $21::double precision AS fuzzy_body_weight,
+        $22::integer AS fuzzy_body_priority,
+        $23::double precision AS fuzzy_name_threshold,
+        $24::double precision AS fuzzy_body_threshold,
         websearch_to_tsquery('english', $1::text) AS tsq_english,
         websearch_to_tsquery('simple', $1::text) AS tsq_simple,
         websearch_to_tsquery('english', $1::text) || websearch_to_tsquery('simple', $1::text) AS tsq_all
@@ -123,12 +178,13 @@ WITH params AS (
         'exact' AS match_type,
         NULL::double precision AS similarity,
         NULL::text AS headline,
-        (1.0 - CASE WHEN n.kind = 'deprecated' THEN 0.15 WHEN n.kind = 'canonical' THEN 0.0 ELSE 0.05 END)::double precision AS score,
-        0 AS priority
+        (p.exact_weight - CASE WHEN n.kind = 'deprecated' THEN 0.15 WHEN n.kind = 'canonical' THEN 0.0 ELSE 0.05 END)::double precision AS score,
+        p.exact_priority AS priority
     FROM names n
     JOIN ideas source_idea ON source_idea.id = n.idea_id
     CROSS JOIN params p
-    WHERE n.text = p.q
+    WHERE p.exact_enabled
+      AND n.text = p.q
       AND (p.kinds IS NULL OR n.kind = ANY(p.kinds))
 
     UNION ALL
@@ -142,13 +198,14 @@ WITH params AS (
         'prefix' AS match_type,
         NULL::double precision AS similarity,
         NULL::text AS headline,
-        (0.8 * char_length(p.q)::double precision / greatest(char_length(n.text::text), 1)
+        (p.prefix_weight * char_length(p.q)::double precision / greatest(char_length(n.text::text), 1)
             - CASE WHEN n.kind = 'deprecated' THEN 0.15 WHEN n.kind = 'canonical' THEN 0.0 ELSE 0.05 END)::double precision AS score,
-        1 AS priority
+        p.prefix_priority AS priority
     FROM names n
     JOIN ideas source_idea ON source_idea.id = n.idea_id
     CROSS JOIN params p
-    WHERE lower(n.text::text) LIKE p.q_lower || '%'
+    WHERE p.prefix_enabled
+      AND lower(n.text::text) LIKE p.q_lower || '%'
       AND n.text <> p.q
       AND (p.kinds IS NULL OR n.kind = ANY(p.kinds))
 
@@ -163,14 +220,14 @@ WITH params AS (
         'fuzzy' AS match_type,
         similarity(n.text::text, p.q) AS similarity,
         NULL::text AS headline,
-        (0.5 * similarity(n.text::text, p.q)
+        (p.fuzzy_name_weight * similarity(n.text::text, p.q)
             - CASE WHEN n.kind = 'deprecated' THEN 0.15 WHEN n.kind = 'canonical' THEN 0.0 ELSE 0.05 END)::double precision AS score,
-        3 AS priority
+        p.fuzzy_name_priority AS priority
     FROM names n
     JOIN ideas source_idea ON source_idea.id = n.idea_id
     CROSS JOIN params p
-    WHERE p.fuzzy
-      AND similarity(n.text::text, p.q) >= p.threshold
+    WHERE p.fuzzy AND p.fuzzy_name_enabled
+      AND similarity(n.text::text, p.q) >= p.fuzzy_name_threshold
       AND n.text::text % p.q
       AND (p.kinds IS NULL OR n.kind = ANY(p.kinds))
 ), fts_matches AS (
@@ -183,8 +240,8 @@ WITH params AS (
         'fts' AS match_type,
         NULL::double precision AS similarity,
         evidence.headline,
-        (0.6 * ts_rank_cd(i.search_doc, p.tsq_all))::double precision AS score,
-        2 AS priority
+        (p.fts_weight * ts_rank_cd(i.search_doc, p.tsq_all))::double precision AS score,
+        p.fts_priority AS priority
     FROM ideas i
     JOIN ideas source_idea ON source_idea.id = i.id
     CROSS JOIN params p
@@ -235,7 +292,7 @@ WITH params AS (
             LIMIT 1
         ) note_hit ON true
     ) evidence
-    WHERE p.include_all
+    WHERE p.include_all AND p.fts_enabled
       AND i.search_doc @@ p.tsq_all
 ), fuzzy_body_matches AS (
     SELECT
@@ -247,12 +304,12 @@ WITH params AS (
         'fuzzy' AS match_type,
         similarity(d.body, p.q) AS similarity,
         ts_headline('english', d.body, p.tsq_english, 'MaxFragments=2,MinWords=5,MaxWords=18') AS headline,
-        (0.3 * similarity(d.body, p.q))::double precision AS score,
-        4 AS priority
+        (p.fuzzy_body_weight * similarity(d.body, p.q))::double precision AS score,
+        p.fuzzy_body_priority AS priority
     FROM definitions d
     JOIN ideas source_idea ON source_idea.id = d.idea_id
     CROSS JOIN params p
-    WHERE p.include_all AND p.fuzzy AND similarity(d.body, p.q) >= p.threshold AND d.body % p.q
+    WHERE p.include_all AND p.fuzzy AND p.fuzzy_body_enabled AND similarity(d.body, p.q) >= p.fuzzy_body_threshold AND d.body % p.q
 
     UNION ALL
 
@@ -265,12 +322,12 @@ WITH params AS (
         'fuzzy' AS match_type,
         similarity(e.body, p.q) AS similarity,
         ts_headline('english', e.body, p.tsq_english, 'MaxFragments=2,MinWords=5,MaxWords=18') AS headline,
-        (0.3 * similarity(e.body, p.q))::double precision AS score,
-        4 AS priority
+        (p.fuzzy_body_weight * similarity(e.body, p.q))::double precision AS score,
+        p.fuzzy_body_priority AS priority
     FROM examples e
     JOIN ideas source_idea ON source_idea.id = e.idea_id
     CROSS JOIN params p
-    WHERE p.include_all AND p.fuzzy AND similarity(e.body, p.q) >= p.threshold AND e.body % p.q
+    WHERE p.include_all AND p.fuzzy AND p.fuzzy_body_enabled AND similarity(e.body, p.q) >= p.fuzzy_body_threshold AND e.body % p.q
 
     UNION ALL
 
@@ -283,12 +340,12 @@ WITH params AS (
         'fuzzy' AS match_type,
         similarity(nt.body, p.q) AS similarity,
         ts_headline('english', nt.body, p.tsq_english, 'MaxFragments=2,MinWords=5,MaxWords=18') AS headline,
-        (0.3 * similarity(nt.body, p.q))::double precision AS score,
-        4 AS priority
+        (p.fuzzy_body_weight * similarity(nt.body, p.q))::double precision AS score,
+        p.fuzzy_body_priority AS priority
     FROM notes nt
     JOIN ideas source_idea ON source_idea.id = nt.idea_id
     CROSS JOIN params p
-    WHERE p.include_all AND p.fuzzy AND similarity(nt.body, p.q) >= p.threshold AND nt.body % p.q
+    WHERE p.include_all AND p.fuzzy AND p.fuzzy_body_enabled AND similarity(nt.body, p.q) >= p.fuzzy_body_threshold AND nt.body % p.q
 ), candidates AS (
     SELECT * FROM name_matches
     UNION ALL SELECT * FROM fts_matches

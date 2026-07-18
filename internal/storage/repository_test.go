@@ -12,7 +12,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"lexinet/internal/model"
+	searchcfg "lexinet/internal/search"
 )
+
+func TestRepositorySearchStrategyProviderOption(t *testing.T) {
+	provider := searchcfg.NewStaticProvider(searchcfg.StrategyLegacy, nil, 7)
+	repo := NewRepository(nil, WithSearchStrategyProvider(provider))
+	strategy, err := repo.searchStrategies.ResolveStrategy("", searchcfg.Overrides{})
+	if err != nil {
+		t.Fatalf("resolve strategy: %v", err)
+	}
+	if strategy.Name != searchcfg.StrategyLegacy || strategy.Fuzzy {
+		t.Fatalf("repository provider strategy = %#v, want legacy fuzzy off", strategy)
+	}
+	if repo.searchStrategies.DefaultLimit() != 7 {
+		t.Fatalf("default limit = %d, want 7", repo.searchStrategies.DefaultLimit())
+	}
+}
 
 func TestUniqueIdeaCandidateDedupeAndAmbiguity(t *testing.T) {
 	id1 := uuid.MustParse("11111111-1111-1111-1111-111111111111")

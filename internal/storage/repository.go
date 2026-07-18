@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"lexinet/internal/model"
+	searchcfg "lexinet/internal/search"
 )
 
 var (
@@ -59,11 +60,26 @@ type dbPool interface {
 }
 
 type Repository struct {
-	db dbPool
+	db               dbPool
+	searchStrategies searchcfg.StrategyProvider
 }
 
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{db: pool}
+type RepositoryOption func(*Repository)
+
+func NewRepository(pool *pgxpool.Pool, opts ...RepositoryOption) *Repository {
+	repo := &Repository{db: pool, searchStrategies: searchcfg.BuiltinProvider()}
+	for _, opt := range opts {
+		opt(repo)
+	}
+	return repo
+}
+
+func WithSearchStrategyProvider(provider searchcfg.StrategyProvider) RepositoryOption {
+	return func(repo *Repository) {
+		if provider != nil {
+			repo.searchStrategies = provider
+		}
+	}
 }
 
 func (r *Repository) CreateIdea(ctx context.Context, input model.CreateIdeaInput) (*model.Idea, error) {

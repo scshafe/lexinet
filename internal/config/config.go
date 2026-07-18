@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	searchcfg "lexinet/internal/search"
 )
 
 const (
@@ -32,8 +34,10 @@ type ServerConfig struct {
 }
 
 type SearchConfig struct {
-	Fuzzy        bool `toml:"fuzzy" json:"fuzzy"`
-	DefaultLimit int  `toml:"default_limit" json:"default_limit"`
+	Fuzzy           *bool                         `toml:"fuzzy,omitempty" json:"fuzzy,omitempty"`
+	DefaultLimit    int                           `toml:"default_limit" json:"default_limit"`
+	DefaultStrategy searchcfg.StrategyName        `toml:"default_strategy" json:"default_strategy"`
+	Strategies      map[string]searchcfg.Strategy `toml:"strategies" json:"strategies"`
 }
 
 type DisplayConfig struct {
@@ -62,8 +66,9 @@ func Default() Config {
 			TokenFile: "~/.config/lexinet/token",
 		},
 		Search: SearchConfig{
-			Fuzzy:        false,
-			DefaultLimit: 20,
+			DefaultLimit:    20,
+			DefaultStrategy: searchcfg.StrategyDailyDriver,
+			Strategies:      stringKeyedStrategies(searchcfg.DefaultStrategies()),
 		},
 		Display: DisplayConfig{
 			Color:    "auto",
@@ -116,9 +121,11 @@ func LoadFile(path string) (Config, error) {
 	} else if err != nil {
 		return Config{}, err
 	}
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Config{}, err
 	}
+	applySearchStrategyPresence(&cfg, meta)
 	return cfg, nil
 }
 
@@ -194,6 +201,24 @@ func (c Config) Redacted() Config {
 	return redacted
 }
 
+func (s SearchConfig) StrategyProvider() searchcfg.StaticProvider {
+	strategies := make(map[searchcfg.StrategyName]searchcfg.Strategy, len(s.Strategies))
+	for name, strategy := range s.Strategies {
+		strategyName := searchcfg.StrategyName(strings.TrimSpace(name))
+		if strategyName == "" {
+			strategyName = strategy.Name
+		}
+		if strategyName == "" {
+			continue
+		}
+		strategy.Name = strategyName
+		strategies[strategyName] = strategy
+	}
+	provider := searchcfg.NewStaticProvider(s.DefaultStrategy, strategies, s.DefaultLimit)
+	provider.FuzzyOverride = s.Fuzzy
+	return provider
+}
+
 func (c *Config) Set(key, value string) error {
 	switch strings.ToLower(key) {
 	case "server.url":
@@ -207,13 +232,15 @@ func (c *Config) Set(key, value string) error {
 		if err != nil {
 			return err
 		}
-		c.Search.Fuzzy = v
+		c.Search.Fuzzy = &v
 	case "search.default_limit":
 		v, err := strconv.Atoi(value)
 		if err != nil {
 			return err
 		}
 		c.Search.DefaultLimit = v
+	case "search.default_strategy":
+		c.Search.DefaultStrategy = searchcfg.StrategyName(strings.TrimSpace(value))
 	case "display.color":
 		c.Display.Color = value
 	case "display.id_length":
@@ -239,9 +266,132 @@ func (c *Config) Set(key, value string) error {
 	case "service.database.dsn":
 		c.Service.Database.DSN = value
 	default:
+		if strings.HasPrefix(strings.ToLower(key), "search.strategies.") {
+			return c.setSearchStrategyValue(key, value)
+		}
 		return fmt.Errorf("unknown config key %q", key)
 	}
 	return nil
+}
+
+func (c *Config) setSearchStrategyValue(key, value string) error {
+	parts := strings.Split(key, ".")
+	if len(parts) < 4 || !strings.EqualFold(parts[0], "search") || !strings.EqualFold(parts[1], "strategies") {
+		return fmt.Errorf("unknown config key %q", key)
+	}
+	strategyName := strings.TrimSpace(parts[2])
+	if strategyName == "" {
+		return fmt.Errorf("invalid search strategy key %q", key)
+	}
+	strategy := c.ensureSearchStrategy(strategyName)
+	switch strings.ToLower(strings.Join(parts[3:], ".")) {
+	case "fuzzy":
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		strategy.Fuzzy = v
+	case "threshold":
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		strategy.Threshold = v
+	default:
+		if len(parts) != 6 || !strings.EqualFold(parts[3], "matchers") {
+			return fmt.Errorf("unknown config key %q", key)
+		}
+		matcherName := searchcfg.MatcherName(strings.TrimSpace(parts[4]))
+		matcher := ensureMatcher(strategy.Matchers, matcherName)
+		switch strings.ToLower(parts[5]) {
+		case "enabled":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			matcher.Enabled = v
+		case "weight":
+			v, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			matcher.Weight = v
+		case "threshold":
+			v, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return err
+			}
+			matcher.Threshold = v
+		case "priority":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				return err
+			}
+			matcher.Priority = v
+		default:
+			return fmt.Errorf("unknown config key %q", key)
+		}
+		strategy.Matchers = upsertMatcher(strategy.Matchers, matcher)
+	}
+	c.Search.Strategies[strategyName] = strategy
+	return nil
+}
+
+func (c *Config) ensureSearchStrategy(name string) searchcfg.Strategy {
+	if c.Search.Strategies == nil {
+		c.Search.Strategies = stringKeyedStrategies(searchcfg.DefaultStrategies())
+	}
+	if strategy, ok := c.Search.Strategies[name]; ok {
+		if strategy.Name == "" {
+			strategy.Name = searchcfg.StrategyName(name)
+		}
+		return strategy
+	}
+	if builtIn, ok := searchcfg.DefaultStrategies()[searchcfg.StrategyName(name)]; ok {
+		return builtIn
+	}
+	return searchcfg.Strategy{Name: searchcfg.StrategyName(name), Threshold: 0.3}
+}
+
+func ensureMatcher(matchers []searchcfg.MatcherConfig, name searchcfg.MatcherName) searchcfg.MatcherConfig {
+	for _, matcher := range matchers {
+		if matcher.Name == name {
+			return matcher
+		}
+	}
+	return searchcfg.MatcherConfig{Name: name, Enabled: true}
+}
+
+func upsertMatcher(matchers []searchcfg.MatcherConfig, matcher searchcfg.MatcherConfig) []searchcfg.MatcherConfig {
+	for i := range matchers {
+		if matchers[i].Name == matcher.Name {
+			matchers[i] = matcher
+			return matchers
+		}
+	}
+	return append(matchers, matcher)
+}
+
+func stringKeyedStrategies(strategies map[searchcfg.StrategyName]searchcfg.Strategy) map[string]searchcfg.Strategy {
+	converted := make(map[string]searchcfg.Strategy, len(strategies))
+	for name, strategy := range strategies {
+		converted[string(name)] = strategy
+	}
+	return converted
+}
+
+func applySearchStrategyPresence(cfg *Config, meta toml.MetaData) {
+	for name, builtIn := range searchcfg.DefaultStrategies() {
+		key := string(name)
+		strategy, ok := cfg.Search.Strategies[key]
+		if !ok {
+			continue
+		}
+		if !meta.IsDefined("search", "strategies", key, "fuzzy") {
+			strategy.Fuzzy = builtIn.Fuzzy
+			cfg.Search.Strategies[key] = strategy
+		}
+	}
 }
 
 func ExpandHome(path string) (string, error) {

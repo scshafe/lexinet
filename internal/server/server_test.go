@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"lexinet/internal/model"
+	searchcfg "lexinet/internal/search"
 	"lexinet/internal/storage"
 )
 
@@ -404,6 +405,36 @@ func TestSearchHandlerPassesStrategyAndExplicitFuzzyOverride(t *testing.T) {
 	}
 	if body.Strategy != "legacy" || body.Fuzzy {
 		t.Fatalf("unexpected search response strategy/fuzzy: %#v", body)
+	}
+}
+
+func TestSearchHandlerAllowsProviderDefaultStrategyAndLimit(t *testing.T) {
+	provider := searchcfg.NewStaticProvider(searchcfg.StrategyLegacy, nil, 7)
+	store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+		if input.Strategy != "" {
+			t.Fatalf("strategy query should be omitted, got %q", input.Strategy)
+		}
+		if input.Limit != 0 {
+			t.Fatalf("limit query should be omitted for provider default, got %d", input.Limit)
+		}
+		input, err := model.NormalizeSearchInputWithProvider(input, provider)
+		if err != nil {
+			return nil, err
+		}
+		return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy, Limit: input.Limit, Provenance: model.SearchResponseProvenance(input)}, nil
+	}}
+	router := Router(Config{}, store)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=redos", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body model.SearchResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if body.Strategy != searchcfg.StrategyLegacy || body.Fuzzy || body.Limit != 7 {
+		t.Fatalf("unexpected provider-normalized response: %#v", body)
 	}
 }
 
