@@ -1,6 +1,6 @@
 # lexinet v2 daily-driver manual acceptance
 
-This walkthrough verifies the topic, acronym-entry, TUI/Terminal User Interface, and menu-bar workflows against a real Postgres-backed service. It is intentionally operator-run: the sandbox must not reach or mutate the host database.
+This walkthrough verifies the topic, acronym-entry, TUI/Terminal User Interface, capture submission, and menu-bar workflows against a real Postgres-backed service. It is intentionally operator-run: the sandbox must not reach or mutate the host database.
 
 ## Preconditions
 
@@ -97,6 +97,50 @@ lexinet traverse tui --relation used_in_definition_of --depth 1 --json
 
 Expected result: traversal includes the TUI to Terminal User Interface relationship while acronym-entry links remain available through `lexinet acronym links`.
 
+## Capture Submissions Workflow
+
+Queue a term from the CLI:
+
+```sh
+lexinet submit "TUI" --context "Captured from menu-bar workflow" --json
+lexinet submission list --status pending --limit 20 --json
+```
+
+Expected result: the submitted term appears as `status: "pending"` with its context preserved.
+
+Verify the same workflow over HTTP:
+
+```sh
+curl -sS -X POST http://127.0.0.1:17892/submissions \
+  -H 'content-type: application/json' \
+  -d '{"term":"CLI","context":"Captured through curl"}'
+
+curl -sS 'http://127.0.0.1:17892/submissions?status=pending&limit=20&offset=0'
+```
+
+Complete one pending submission after a real idea exists:
+
+```sh
+lexinet idea add "Command-Line Interface" --slug command-line-interface --summary "Command-oriented interface for terminals" --json
+lexinet submission complete 77777777-7777-7777-7777-777777777777 command-line-interface --note "Linked to existing CLI idea" --json
+
+curl -sS -X POST http://127.0.0.1:17892/submissions/77777777-7777-7777-7777-777777777777/complete \
+  -H 'content-type: application/json' \
+  -d '{"idea":"command-line-interface","note":"Linked to existing CLI idea"}'
+```
+
+Fail one pending submission when it should not become an idea:
+
+```sh
+lexinet submission fail 88888888-8888-8888-8888-888888888888 --note "Duplicate capture" --json
+
+curl -sS -X POST http://127.0.0.1:17892/submissions/88888888-8888-8888-8888-888888888888/fail \
+  -H 'content-type: application/json' \
+  -d '{"note":"Duplicate capture"}'
+```
+
+Expected result: completed submissions move to `status: "enriched"` with an `idea_id`; failed submissions move to `status: "failed"` with the note preserved. Host DB integration for these transitions is operator-verified because the sandbox must not connect to the host Postgres instance.
+
 ## macOS Menu-Bar Workflow
 
 Run on macOS with Swift available:
@@ -115,6 +159,10 @@ Acceptance checks:
 - Searching `TUI` returns the standalone TUI entry and displays names, definition text when present, topic summaries, and acronym-link summaries.
 - Searching `Terminal User Interface` returns the expansion entry and displays the reverse acronym link.
 - Stopping `lexinet serve` and searching again shows the service-unavailable hint instead of terminating the menu-bar process.
+- Clicking `+` opens capture mode; `Submit to Agent` stays disabled until the idea field contains non-whitespace text.
+- Submitting a term queues it, shows `Queued for enrichment`, and returns to search; the queued row is visible through `lexinet submission list --status pending --json` against the host service.
+- With the service stopped, capture submit shows an inline error and preserves the typed idea/context.
+- The direct `Submit (direct add later)` placeholder remains disabled and does not write ideas.
 - Start-at-login setup follows `clients/macos/README.md` and does not require credentials or localhost OAuth callbacks.
 
 ## Sandbox Verification
@@ -129,4 +177,24 @@ GOTMPDIR=/workspace/.gotmp GOCACHE=/workspace/.go-cache go vet ./...
 GOTMPDIR=/workspace/.gotmp GOCACHE=/workspace/.go-cache go test ./...
 ```
 
-If `swift` is not installed in the sandbox, record macOS build/test/menu-bar launch verification as the operator gate above instead of bypassing with host mutations.
+For the submissions capture documentation slice, run the required checks explicitly:
+
+```sh
+mkdir -p /workspace/.gotmp-test /workspace/.gotmp-vet /workspace/.gotmp-build /workspace/.go-cache
+GOTMPDIR=/workspace/.gotmp-test GOCACHE=/workspace/.go-cache go test ./...
+GOTMPDIR=/workspace/.gotmp-vet GOCACHE=/workspace/.go-cache go vet ./...
+GOTMPDIR=/workspace/.gotmp-build GOCACHE=/workspace/.go-cache go build ./cmd/lexinet
+cd clients/macos && swift build
+cd clients/macos && swift test
+```
+
+If `swift` is not installed in the sandbox, record macOS build/test/menu-bar launch verification as the operator gate above instead of bypassing with host mutations. Host DB integration for submission create/list/complete/fail is operator-verified; the sandbox verification is limited to Go tests/vet/build and Swift package checks when the toolchain exists.
+
+2026-07-18 sandbox result for the docs/version submissions slice:
+
+- `GOTMPDIR=/workspace/.gotmp-test GOCACHE=/workspace/.go-cache go test ./...` passed.
+- `GOTMPDIR=/workspace/.gotmp-vet GOCACHE=/workspace/.go-cache go vet ./...` passed.
+- `GOTMPDIR=/workspace/.gotmp-build GOCACHE=/workspace/.go-cache go build ./cmd/lexinet` passed.
+- `GOTMPDIR=/workspace/.gotmp-version GOCACHE=/workspace/.go-cache go run ./cmd/lexinet version --json` returned `0.2.0-dev`.
+- `swift build` and `swift test` were not run because `swift --version` failed with `swift: command not found` in this Linux sandbox.
+- Host DB submission integration remains operator-verified: run the capture submission CLI/curl create, list pending, complete, and fail steps above against the Postgres-backed host service.

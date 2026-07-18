@@ -53,6 +53,18 @@ The `Submit to Agent` button is disabled until the idea field has non-whitespace
 
 The disabled `Submit (direct add later)` button is visible only as a future direct-write placeholder; the menu-bar app does not write ideas directly.
 
+Manual capture walkthrough:
+
+1. Start `lexinet serve --tailnet off` and run `swift run LexinetMenuBar` from this directory.
+2. Open the `Lexinet` menu-bar popover and click `+`.
+3. Confirm `Submit to Agent` is disabled while `Idea (word or acronym)` is empty or whitespace-only.
+4. Type `TUI` in the idea field and add optional context such as `Seen in terminal UI notes`.
+5. Confirm `Submit to Agent` becomes enabled while `Submit (direct add later)` remains visible and disabled.
+6. Click `Submit to Agent`; expect `Queued for enrichment`, then automatic return to search.
+7. Confirm the queue from the service side with `lexinet submission list --status pending --json` or `curl -sS 'http://127.0.0.1:17892/submissions?status=pending'`.
+8. Stop the service, reopen capture mode, enter idea/context, and click `Submit to Agent`.
+9. Confirm the inline service error is shown and the typed idea/context are preserved for retry.
+
 ## Install
 
 For a local developer install, build a release binary and place it under a user-owned app/bin location:
@@ -95,3 +107,5 @@ Sandbox verification cannot launch the macOS menu-bar UI. On Apple Silicon, veri
 8. Entering an idea and context, then clicking `Submit to Agent`, queues a pending submission and returns to search after the success confirmation.
 9. Stopping the service, entering capture text, and clicking `Submit to Agent` shows an inline service error without clearing the typed text.
 10. `Submit (direct add later)` is visible and disabled; no direct idea write is available from the app.
+
+The host DB integration check is operator-verified: after a successful capture, `lexinet submission list --status pending --json` must show the queued term in the same Postgres-backed service used by the menu-bar app.

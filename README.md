@@ -14,6 +14,7 @@ The project ships as one Go 1.23.4 binary named `lexinet`:
 - Name management for canonical, acronym, alias, deprecated, and localized names.
 - First-class topics that can be created, renamed, assigned to ideas, and used to filter idea lists.
 - Acronym-as-entry links that connect a standalone acronym idea to its standalone expansion idea.
+- Durable capture submissions for later agent enrichment.
 - Child bodies for definitions, examples, and notes.
 - Typed relationship graph with forward/reverse labels and bounded traversal.
 - Exact, prefix, full-text, and opt-in trigram fuzzy search.
@@ -83,6 +84,42 @@ lexinet traverse redis --direction both --depth 2 --json
 ```
 
 Destructive commands such as removal and merge require `--yes` when stdin is not a TTY.
+
+## Capture Submissions
+
+Use submissions when you want to capture a term quickly and let an enrichment agent create or link the final idea later. A submission starts as `pending`, then an agent or operator marks it `enriched` with an idea reference or `failed` with a note.
+
+CLI workflow:
+
+```sh
+lexinet submit "TUI" --context "Saw this in a terminal UI note" --json
+lexinet submission list --status pending --limit 20 --json
+lexinet submission list --status pending --jsonl
+
+lexinet idea add "Terminal User Interface" --slug terminal-user-interface --summary "Interactive text UI for terminal sessions" --json
+lexinet submission complete 77777777-7777-7777-7777-777777777777 terminal-user-interface --note "Created expansion idea" --json
+lexinet submission fail 88888888-8888-8888-8888-888888888888 --note "Duplicate or not in scope" --json
+```
+
+HTTP workflow:
+
+```sh
+curl -sS -X POST http://127.0.0.1:17892/submissions \
+  -H 'content-type: application/json' \
+  -d '{"term":"TUI","context":"Saw this in a terminal UI note"}'
+
+curl -sS 'http://127.0.0.1:17892/submissions?status=pending&limit=20&offset=0'
+
+curl -sS -X POST http://127.0.0.1:17892/submissions/77777777-7777-7777-7777-777777777777/complete \
+  -H 'content-type: application/json' \
+  -d '{"idea":"terminal-user-interface","note":"Created expansion idea"}'
+
+curl -sS -X POST http://127.0.0.1:17892/submissions/88888888-8888-8888-8888-888888888888/fail \
+  -H 'content-type: application/json' \
+  -d '{"note":"Duplicate or not in scope"}'
+```
+
+The list endpoint accepts `status=pending|enriched|failed`, `limit`, and `offset`. Completion resolves `idea` with the same idea-reference semantics used elsewhere in the API and rejects terminal submissions instead of mutating them.
 
 ## Daily-Driver Workflows
 
@@ -166,7 +203,7 @@ swift test
 swift run LexinetMenuBar
 ```
 
-Click the `Lexinet` menu-bar item, search a term, and confirm results show names, definition text, topics, and acronym-link summaries when present. The app shows a service-unavailable hint instead of exiting when the Go service is down. See `clients/macos/README.md` for local install and login-item setup.
+Click the `Lexinet` menu-bar item, search a term, and confirm results show names, definition text, topics, and acronym-link summaries when present. The app shows a service-unavailable hint instead of exiting when the Go service is down. The `+` button opens capture mode, where `Submit to Agent` queues a pending submission and the disabled direct `Submit` button remains a visible placeholder. See `clients/macos/README.md` for local install, login-item setup, and manual capture validation.
 
 ## Docker Deploy
 
@@ -191,6 +228,6 @@ The graph records the agent CLI (`agent-cli`), HTTP service on `:17892` (`http-s
 
 Final Phase 8 sandbox validation evidence is in `docs/validation/phase-8.md`.
 
-Daily-driver manual acceptance for topics, acronym-entry links, TUI/Terminal User Interface linking, and macOS menu-bar setup is in `docs/validation/v2-daily-driver.md`.
+Daily-driver manual acceptance for topics, acronym-entry links, TUI/Terminal User Interface linking, capture submissions, and macOS menu-bar setup is in `docs/validation/v2-daily-driver.md`.
 
 Database integration remains host/operator verified because this sandbox must not reach host Postgres directly.
