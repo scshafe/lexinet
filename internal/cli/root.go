@@ -73,6 +73,8 @@ func NewRoot(opts *Options) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.Endpoint, "endpoint", "", "lexinet service endpoint")
 	root.PersistentFlags().StringVar(&opts.TokenFile, "token-file", "", "file containing bearer token")
 	root.AddCommand(
+		newSubmitCommand(opts),
+		newSubmissionCommand(opts),
 		newIdeaCommand(opts),
 		newTopicCommand(opts),
 		newAcronymCommand(opts),

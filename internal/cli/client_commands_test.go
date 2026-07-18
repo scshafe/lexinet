@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -264,6 +265,142 @@ func TestAcronymCommandsUseHTTPClientLayer(t *testing.T) {
 		if !seen[key] {
 			t.Fatalf("did not see %s request", key)
 		}
+	}
+}
+
+func TestSubmissionCommandsUseHTTPClientLayer(t *testing.T) {
+	setupClientConfig(t)
+
+	submissionID := "77777777-7777-7777-7777-777777777777"
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case http.MethodPost + " /submissions":
+			seen["submit"] = true
+			if r.URL.RawQuery != "" {
+				t.Fatalf("unexpected submit query: %s", r.URL.RawQuery)
+			}
+			var input model.CreateSubmissionInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.Term != "TUI" || input.Context == nil || *input.Context != "menu bar capture" {
+				t.Fatalf("unexpected submit payload: %#v", input)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"` + submissionID + `","term":"TUI","context":"menu bar capture","status":"pending","created_at":"2026-07-18T00:00:00Z","updated_at":"2026-07-18T00:00:00Z"}`))
+		case http.MethodGet + " /submissions":
+			seen["list"] = true
+			if r.URL.RawQuery != "limit=5&offset=2&status=pending" {
+				t.Fatalf("unexpected list query: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"total":2,"limit":5,"offset":2,"submissions":[{"id":"` + submissionID + `","term":"TUI","status":"pending","created_at":"2026-07-18T00:00:00Z","updated_at":"2026-07-18T00:00:00Z"},{"id":"88888888-8888-8888-8888-888888888888","term":"Redis","status":"pending","created_at":"2026-07-18T00:00:00Z","updated_at":"2026-07-18T00:00:00Z"}]}`))
+		case http.MethodPost + " /submissions/" + submissionID + "/complete":
+			seen["complete"] = true
+			var input model.CompleteSubmissionInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.Idea != "Terminal User Interface" || input.Note == nil || *input.Note != "created idea" {
+				t.Fatalf("unexpected complete payload: %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"id":"` + submissionID + `","term":"TUI","status":"enriched","note":"created idea","created_at":"2026-07-18T00:00:00Z","updated_at":"2026-07-18T00:00:00Z"}`))
+		case http.MethodPost + " /submissions/" + submissionID + "/fail":
+			seen["fail"] = true
+			var input model.FailSubmissionInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.Note == nil || *input.Note != "duplicate" {
+				t.Fatalf("unexpected fail payload: %#v", input)
+			}
+			_, _ = w.Write([]byte(`{"id":"` + submissionID + `","term":"TUI","status":"failed","note":"duplicate","created_at":"2026-07-18T00:00:00Z","updated_at":"2026-07-18T00:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	commands := [][]string{
+		{"--endpoint", server.URL, "submit", " TUI ", "--context", " menu bar capture "},
+		{"--endpoint", server.URL, "submission", "complete", submissionID, " Terminal User Interface ", "--note", " created idea "},
+		{"--endpoint", server.URL, "submission", "fail", submissionID, "--note", " duplicate "},
+	}
+	for _, args := range commands {
+		stdout, _, err := executeTestCommand(t, args, nil)
+		if err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		if stdout == "" {
+			t.Fatalf("stdout empty for %v", args)
+		}
+	}
+
+	stdout, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "submission", "list", "--status", "pending", "--limit", "5", "--offset", "2", "--jsonl"}, nil)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "TUI") || !strings.Contains(lines[1], "Redis") {
+		t.Fatalf("unexpected submission jsonl stdout: %q", stdout)
+	}
+	for _, key := range []string{"submit", "list", "complete", "fail"} {
+		if !seen[key] {
+			t.Fatalf("did not see %s request", key)
+		}
+	}
+}
+
+func TestSubmissionServiceErrorUsesTypedExit(t *testing.T) {
+	setupClientConfig(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/submissions/77777777-7777-7777-7777-777777777777/complete" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"SUBMISSION_INVALID_TRANSITION","message":"submission is not pending"}}`))
+	}))
+	defer server.Close()
+
+	_, _, err := executeTestCommand(t, []string{"--endpoint", server.URL, "submission", "complete", "77777777-7777-7777-7777-777777777777", "redis"}, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := exitCode(err); got != ExitValidation {
+		t.Fatalf("exit code = %d, want %d", got, ExitValidation)
+	}
+	var serviceErr *ServiceError
+	if !errors.As(err, &serviceErr) || serviceErr.Code != "SUBMISSION_INVALID_TRANSITION" {
+		t.Fatalf("service error = %#v, want submission transition error", serviceErr)
+	}
+}
+
+func TestSubmissionLocalValidationFailures(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	for _, args := range [][]string{
+		{"--endpoint", server.URL, "submit", "   "},
+		{"--endpoint", server.URL, "submission", "list", "--status", "done"},
+		{"--endpoint", server.URL, "submission", "complete", "77777777-7777-7777-7777-777777777777", "   "},
+	} {
+		_, _, err := executeTestCommand(t, args, nil)
+		if err == nil {
+			t.Fatalf("expected error for %v", args)
+		}
+		if got := exitCode(err); got != ExitUsage {
+			t.Fatalf("exit code for %v = %d, want %d", args, got, ExitUsage)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("expected no HTTP calls for local validation failures, got %d", calls)
 	}
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,111 @@ import (
 
 	"lexinet/internal/model"
 )
+
+func newSubmitCommand(opts *Options) *cobra.Command {
+	var contextText string
+	cmd := &cobra.Command{
+		Use:   "submit <term>",
+		Short: "Queue a term for later enrichment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			input, err := normalizeCreateSubmissionInput(model.CreateSubmissionInput{Term: args[0], Context: stringPtrIf(contextText)})
+			if err != nil {
+				return err
+			}
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, "/submissions", input, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&contextText, "context", "", "optional capture context")
+	return cmd
+}
+
+func newSubmissionCommand(opts *Options) *cobra.Command {
+	cmd := &cobra.Command{Use: "submission", Short: "Manage capture submissions"}
+	cmd.AddCommand(newSubmissionListCommand(opts), newSubmissionCompleteCommand(opts), newSubmissionFailCommand(opts))
+	return cmd
+}
+
+func newSubmissionListCommand(opts *Options) *cobra.Command {
+	var status string
+	var limit, offset int
+	var jsonl bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List capture submissions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := url.Values{}
+			if strings.TrimSpace(status) != "" {
+				statusValue := model.SubmissionStatus(strings.TrimSpace(status))
+				if !statusValue.Valid() {
+					return usageError("invalid status %q (valid: %s)", status, joinSubmissionStatuses())
+				}
+				query.Set("status", string(statusValue))
+			}
+			setQueryInt(query, "limit", limit)
+			setQueryInt(query, "offset", offset)
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodGet, pathWithQuery("/submissions", query), nil, &out); err != nil {
+				return err
+			}
+			if jsonl {
+				return outputJSONLField(cmd, out, "submissions")
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&status, "status", "", "filter by status: pending, enriched, or failed")
+	cmd.Flags().IntVar(&limit, "limit", 20, "result limit")
+	cmd.Flags().IntVar(&offset, "offset", 0, "result offset")
+	cmd.Flags().BoolVar(&jsonl, "jsonl", false, "emit submissions as JSON Lines")
+	return cmd
+}
+
+func newSubmissionCompleteCommand(opts *Options) *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "complete <submission-id> <idea-ref>",
+		Short: "Mark a submission enriched by an idea",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			input, err := normalizeCompleteSubmissionInput(model.CompleteSubmissionInput{Idea: args[1], Note: stringPtrIf(note)})
+			if err != nil {
+				return err
+			}
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, apiPath("/submissions/{}/complete", args[0]), input, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "completion note")
+	return cmd
+}
+
+func newSubmissionFailCommand(opts *Options) *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use:   "fail <submission-id>",
+		Short: "Mark a submission failed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			input := model.NormalizeFailSubmissionInput(model.FailSubmissionInput{Note: stringPtrIf(note)})
+			var out json.RawMessage
+			if err := clientDo(cmd.Context(), opts, http.MethodPost, apiPath("/submissions/{}/fail", args[0]), input, &out); err != nil {
+				return err
+			}
+			return outputRaw(cmd, opts, out)
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "failure note")
+	return cmd
+}
 
 func newIdeaCommand(opts *Options) *cobra.Command {
 	cmd := &cobra.Command{Use: "idea", Short: "Manage ideas"}
@@ -898,6 +1004,37 @@ func joinNameKinds() string {
 		parts = append(parts, string(value))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func joinSubmissionStatuses() string {
+	return strings.Join([]string{
+		string(model.SubmissionStatusPending),
+		string(model.SubmissionStatusEnriched),
+		string(model.SubmissionStatusFailed),
+	}, ", ")
+}
+
+func normalizeCreateSubmissionInput(input model.CreateSubmissionInput) (model.CreateSubmissionInput, error) {
+	input, err := model.NormalizeCreateSubmissionInput(input)
+	if err != nil {
+		return input, submissionUsageError(err)
+	}
+	return input, nil
+}
+
+func normalizeCompleteSubmissionInput(input model.CompleteSubmissionInput) (model.CompleteSubmissionInput, error) {
+	input, err := model.NormalizeCompleteSubmissionInput(input)
+	if err != nil {
+		return input, submissionUsageError(err)
+	}
+	return input, nil
+}
+
+func submissionUsageError(err error) error {
+	if errors.Is(err, model.ErrSubmissionTermRequired) || errors.Is(err, model.ErrSubmissionIdeaRequired) {
+		return usageError(err.Error())
+	}
+	return err
 }
 
 func rawID(raw json.RawMessage) string {
