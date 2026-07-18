@@ -379,23 +379,32 @@ func TestSearchResponseIncludesEnrichment(t *testing.T) {
 	}
 }
 
-func TestSearchHandlerPassesStrategyAndExplicitFuzzyOverride(t *testing.T) {
+func TestSearchHandlerDefaultRequestUsesDailyDriverAndExistingParams(t *testing.T) {
 	store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
-		if input.Strategy != "legacy" {
-			t.Fatalf("strategy = %q, want legacy", input.Strategy)
+		if input.Query != "redos" || input.Scope != model.SearchScopeNames || input.Limit != 5 || input.Offset != 2 {
+			t.Fatalf("unexpected raw search input: %#v", input)
 		}
-		if input.FuzzyOverride == nil || *input.FuzzyOverride {
-			t.Fatalf("expected explicit fuzzy=false override, got %#v", input.FuzzyOverride)
+		if input.Strategy != "" {
+			t.Fatalf("strategy query should be omitted for server default, got %q", input.Strategy)
 		}
+		if input.FuzzyOverride != nil || input.ThresholdOverride != nil {
+			t.Fatalf("default request should not set overrides: fuzzy=%#v threshold=%#v", input.FuzzyOverride, input.ThresholdOverride)
+		}
+		wantKinds := []model.NameKind{model.NameKindCanonical, model.NameKindAlias, model.NameKindAcronym}
+		assertNameKinds(t, input.Kinds, wantKinds)
+
 		input, err := model.NormalizeSearchInput(input)
 		if err != nil {
 			return nil, err
 		}
-		return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy, Limit: input.Limit, Provenance: model.SearchResponseProvenance(input)}, nil
+		if input.Strategy != searchcfg.StrategyDailyDriver || !input.Fuzzy || input.Threshold != 0.3 {
+			t.Fatalf("default strategy semantics = strategy %q fuzzy %v threshold %v", input.Strategy, input.Fuzzy, input.Threshold)
+		}
+		return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy, Limit: input.Limit, Offset: input.Offset, Provenance: model.SearchResponseProvenance(input)}, nil
 	}}
 	router := Router(Config{}, store)
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=redos&strategy=legacy&fuzzy=false", nil))
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=redos&scope=names&kind=canonical,alias&kind=acronym&limit=5&offset=2", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -403,8 +412,126 @@ func TestSearchHandlerPassesStrategyAndExplicitFuzzyOverride(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode search: %v", err)
 	}
-	if body.Strategy != "legacy" || body.Fuzzy {
-		t.Fatalf("unexpected search response strategy/fuzzy: %#v", body)
+	if body.Strategy != searchcfg.StrategyDailyDriver || !body.Fuzzy || body.Limit != 5 || body.Offset != 2 {
+		t.Fatalf("unexpected default response: %#v", body)
+	}
+}
+
+func TestSearchHandlerPassesStrategyAndExplicitOverrides(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	thresholdValue := 0.72
+	tests := []struct {
+		name                  string
+		target                string
+		wantRawStrategy       model.SearchStrategyName
+		wantStrategy          model.SearchStrategyName
+		wantFuzzy             bool
+		wantThreshold         float64
+		wantFuzzyOverride     *bool
+		wantThresholdOverride *float64
+	}{
+		{
+			name:            "legacy defaults fuzzy off",
+			target:          "/search?q=redos&strategy=legacy",
+			wantRawStrategy: searchcfg.StrategyLegacy,
+			wantStrategy:    searchcfg.StrategyLegacy,
+			wantFuzzy:       false,
+			wantThreshold:   0.3,
+		},
+		{
+			name:              "explicit fuzzy false overrides daily driver",
+			target:            "/search?q=redos&fuzzy=false",
+			wantStrategy:      searchcfg.StrategyDailyDriver,
+			wantFuzzy:         false,
+			wantThreshold:     0.3,
+			wantFuzzyOverride: &falseValue,
+		},
+		{
+			name:              "explicit fuzzy true overrides legacy",
+			target:            "/search?q=redos&strategy=legacy&fuzzy=true",
+			wantRawStrategy:   searchcfg.StrategyLegacy,
+			wantStrategy:      searchcfg.StrategyLegacy,
+			wantFuzzy:         true,
+			wantThreshold:     0.3,
+			wantFuzzyOverride: &trueValue,
+		},
+		{
+			name:                  "explicit threshold overrides legacy",
+			target:                "/search?q=redos&strategy=legacy&threshold=0.72",
+			wantRawStrategy:       searchcfg.StrategyLegacy,
+			wantStrategy:          searchcfg.StrategyLegacy,
+			wantFuzzy:             false,
+			wantThreshold:         thresholdValue,
+			wantThresholdOverride: &thresholdValue,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+				if input.Strategy != tc.wantRawStrategy {
+					t.Fatalf("raw strategy = %q, want %q", input.Strategy, tc.wantRawStrategy)
+				}
+				assertBoolPointer(t, "fuzzy override", input.FuzzyOverride, tc.wantFuzzyOverride)
+				assertFloatPointer(t, "threshold override", input.ThresholdOverride, tc.wantThresholdOverride)
+
+				input, err := model.NormalizeSearchInput(input)
+				if err != nil {
+					return nil, err
+				}
+				if input.Strategy != tc.wantStrategy || input.Fuzzy != tc.wantFuzzy || input.Threshold != tc.wantThreshold {
+					t.Fatalf("normalized search = strategy %q fuzzy %v threshold %v", input.Strategy, input.Fuzzy, input.Threshold)
+				}
+				return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy, Limit: input.Limit, Provenance: model.SearchResponseProvenance(input)}, nil
+			}}
+			router := Router(Config{}, store)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			var body model.SearchResponse
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatalf("decode search: %v", err)
+			}
+			if body.Strategy != tc.wantStrategy || body.Fuzzy != tc.wantFuzzy {
+				t.Fatalf("unexpected search response strategy/fuzzy: %#v", body)
+			}
+		})
+	}
+}
+
+func TestSearchHandlerRejectsUnknownStrategy(t *testing.T) {
+	store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+		input, err := model.NormalizeSearchInput(input)
+		if err != nil {
+			return nil, err
+		}
+		return &model.SearchResponse{Query: input.Query, Scope: input.Scope, Fuzzy: input.Fuzzy, Strategy: input.Strategy}, nil
+	}}
+	router := Router(Config{}, store)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=redos&strategy=unknown", nil))
+	assertError(t, rec, http.StatusBadRequest, "BAD_REQUEST")
+}
+
+func TestSearchHandlerRejectsInvalidOverrides(t *testing.T) {
+	tests := []string{
+		"/search?q=redos&fuzzy=maybe",
+		"/search?q=redos&threshold=close",
+	}
+	for _, target := range tests {
+		t.Run(target, func(t *testing.T) {
+			store := fakeStore{search: func(ctx context.Context, input model.SearchInput) (*model.SearchResponse, error) {
+				t.Fatal("store search should not be called for invalid overrides")
+				return nil, nil
+			}}
+			router := Router(Config{}, store)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+			assertError(t, rec, http.StatusBadRequest, "BAD_REQUEST")
+		})
 	}
 }
 
@@ -449,6 +576,44 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 	}
 	if envelope.Error.Code != code {
 		t.Fatalf("code = %q, want %q", envelope.Error.Code, code)
+	}
+}
+
+func assertNameKinds(t *testing.T, got, want []model.NameKind) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("name kinds = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("name kinds = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func assertBoolPointer(t *testing.T, label string, got, want *bool) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != want {
+			t.Fatalf("%s = %#v, want %#v", label, got, want)
+		}
+		return
+	}
+	if *got != *want {
+		t.Fatalf("%s = %v, want %v", label, *got, *want)
+	}
+}
+
+func assertFloatPointer(t *testing.T, label string, got, want *float64) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != want {
+			t.Fatalf("%s = %#v, want %#v", label, got, want)
+		}
+		return
+	}
+	if *got != *want {
+		t.Fatalf("%s = %v, want %v", label, *got, *want)
 	}
 }
 

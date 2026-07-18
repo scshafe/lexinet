@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -843,6 +844,7 @@ func failSubmissionHandler(store Store) http.HandlerFunc {
 
 func searchHandler(store Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
 		limit, ok := queryInt(w, r, "limit", 0)
 		if !ok {
 			return
@@ -860,11 +862,11 @@ func searchHandler(store Store) http.HandlerFunc {
 			return
 		}
 		input := model.SearchInput{
-			Query:     r.URL.Query().Get("q"),
-			Scope:     model.SearchScope(r.URL.Query().Get("scope")),
+			Query:     query.Get("q"),
+			Scope:     model.SearchScope(query.Get("scope")),
 			Fuzzy:     fuzzy,
 			Threshold: threshold,
-			Strategy:  searchStrategy(r),
+			Strategy:  searchStrategy(query),
 			Limit:     limit,
 			Offset:    offset,
 		}
@@ -874,16 +876,7 @@ func searchHandler(store Store) http.HandlerFunc {
 		if thresholdSet {
 			input.ThresholdOverride = &input.Threshold
 		}
-		kinds := make([]model.NameKind, 0)
-		for _, value := range r.URL.Query()["kind"] {
-			for _, part := range strings.Split(value, ",") {
-				part = strings.TrimSpace(part)
-				if part != "" {
-					kinds = append(kinds, model.NameKind(part))
-				}
-			}
-		}
-		input.Kinds = kinds
+		input.Kinds = searchKinds(query)
 		response, err := store.Search(r.Context(), input)
 		if err != nil {
 			writeStoreError(w, err)
@@ -893,8 +886,21 @@ func searchHandler(store Store) http.HandlerFunc {
 	}
 }
 
-func searchStrategy(r *http.Request) model.SearchStrategyName {
-	return model.SearchStrategyName(strings.TrimSpace(r.URL.Query().Get("strategy")))
+func searchStrategy(query url.Values) model.SearchStrategyName {
+	return model.SearchStrategyName(strings.TrimSpace(query.Get("strategy")))
+}
+
+func searchKinds(query url.Values) []model.NameKind {
+	kinds := make([]model.NameKind, 0)
+	for _, value := range query["kind"] {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				kinds = append(kinds, model.NameKind(part))
+			}
+		}
+	}
+	return kinds
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
