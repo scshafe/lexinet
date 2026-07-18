@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: lexinet
       POSTGRES_USER: lexinet
@@ -17,11 +18,15 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "17892:17892"
+      # loopback ONLY — the VM cannot bind the host's tailscale address. Tailnet exposure is
+      # bridged host-side by `tailscale serve --bg --tcp 17892 tcp://127.0.0.1:17892`
+      # (tailnet-only, no LAN exposure; persisted by tailscaled across restarts).
+      - "127.0.0.1:17892:17892"
     environment:
       LEXINET_CONFIG: /etc/lexinet/config.toml
     volumes:

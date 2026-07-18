@@ -58,8 +58,24 @@ final class LookupViewModel: ObservableObject {
 
     private let api: LexinetAPI
 
-    init(api: LexinetAPI = LexinetAPI()) {
+    init(api: LexinetAPI = LexinetAPI(baseURL: LookupViewModel.configuredEndpoint())) {
         self.api = api
+    }
+
+    /// The service endpoint, overridable for a shared/tailnet lexicon: the LEXINET_ENDPOINT
+    /// environment variable wins, then the "endpoint" user default (`defaults write
+    /// dev.lexinet.menubar endpoint http://host:17892`), then the local default.
+    nonisolated static func configuredEndpoint() -> URL {
+        let fallback = URL(string: "http://127.0.0.1:17892")!
+        if let raw = ProcessInfo.processInfo.environment["LEXINET_ENDPOINT"],
+           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme != nil {
+            return url
+        }
+        if let raw = UserDefaults.standard.string(forKey: "endpoint"),
+           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme != nil {
+            return url
+        }
+        return fallback
     }
 
     func search() async {
