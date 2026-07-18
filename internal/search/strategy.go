@@ -56,10 +56,11 @@ type ResponseProvenance struct {
 }
 
 type ResultProvenance struct {
-	Strategy StrategyName `json:"strategy"`
-	Matcher  MatcherName  `json:"matcher"`
-	Weight   float64      `json:"weight"`
-	Priority int          `json:"priority"`
+	Strategy  StrategyName `json:"strategy"`
+	Matcher   MatcherName  `json:"matcher"`
+	Weight    float64      `json:"weight"`
+	Threshold float64      `json:"threshold,omitempty"`
+	Priority  int          `json:"priority"`
 }
 
 type StrategyProvider interface {

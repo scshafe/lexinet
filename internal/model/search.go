@@ -71,6 +71,7 @@ type SearchResult struct {
 	MatchedName     *string                     `json:"matched_name,omitempty"`
 	MatchedNameType *NameKind                   `json:"matched_name_type,omitempty"`
 	MatchType       SearchMatchType             `json:"match_type"`
+	Matcher         searchcfg.MatcherName       `json:"matcher,omitempty"`
 	Similarity      *float64                    `json:"similarity,omitempty"`
 	Headline        *string                     `json:"headline,omitempty"`
 	Provenance      *searchcfg.ResultProvenance `json:"provenance,omitempty"`
@@ -209,10 +210,13 @@ func SearchResponseProvenance(input SearchInput) *searchcfg.ResponseProvenance {
 func SearchResultProvenance(input SearchInput, result SearchResult) *searchcfg.ResultProvenance {
 	matcherName := SearchMatcherName(result)
 	matcher, _ := searchcfg.MatcherByName(input.StrategyConfig, matcherName)
-	return &searchcfg.ResultProvenance{Strategy: input.Strategy, Matcher: matcherName, Weight: matcher.Weight, Priority: matcher.Priority}
+	return &searchcfg.ResultProvenance{Strategy: input.Strategy, Matcher: matcherName, Weight: matcher.Weight, Threshold: matcher.Threshold, Priority: matcher.Priority}
 }
 
 func SearchMatcherName(result SearchResult) searchcfg.MatcherName {
+	if result.Matcher != "" {
+		return result.Matcher
+	}
 	switch result.MatchType {
 	case SearchMatchExact:
 		return searchcfg.MatcherExact
