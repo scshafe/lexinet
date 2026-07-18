@@ -9,10 +9,34 @@ final class ModelDecodingTests: XCTestCase {
         let response = try decode(SearchResponse.self, fixture: "search-enriched")
 
         XCTAssertEqual(response.query, "tui")
+        XCTAssertNil(response.strategy)
+        XCTAssertNil(response.provenance)
         XCTAssertEqual(response.results.count, 1)
         XCTAssertEqual(response.results[0].idea.canonicalName, "TUI")
         XCTAssertEqual(response.results[0].idea.topics.map(\.displayName), ["software", "interfaces"])
         XCTAssertEqual(response.results[0].idea.acronymLinks[0].summary, "Expands to Terminal User Interface")
+        XCTAssertNil(response.results[0].matcher)
+        XCTAssertNil(response.results[0].provenance)
+    }
+
+    func testDecodesSearchStrategyAndProvenanceFixture() throws {
+        let response = try decode(SearchResponse.self, fixture: "search-strategy-provenance")
+
+        XCTAssertEqual(response.query, "redos")
+        XCTAssertEqual(response.strategy, "daily-driver")
+        XCTAssertEqual(response.provenance?.strategy, "daily-driver")
+        XCTAssertEqual(response.provenance?.fuzzy, true)
+        XCTAssertEqual(response.provenance?.threshold, 0.3)
+        let matchers = try XCTUnwrap(response.provenance?.matchers)
+        XCTAssertEqual(matchers.compactMap(\.name), ["exact", "fuzzy-name"])
+        XCTAssertNil(response.provenance?.overrides)
+        XCTAssertEqual(response.results[0].matcher, "fuzzy-name")
+        XCTAssertEqual(response.results[0].similarity, 0.84)
+        XCTAssertEqual(response.results[0].provenance?.strategy, "daily-driver")
+        XCTAssertEqual(response.results[0].provenance?.matcher, "fuzzy-name")
+        XCTAssertEqual(response.results[0].provenance?.weight, 0.5)
+        XCTAssertEqual(response.results[0].provenance?.threshold, 0.3)
+        XCTAssertEqual(response.results[0].provenance?.priority, 2)
     }
 
     func testDecodesIdeaDetailFixture() throws {
@@ -90,6 +114,44 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(submission.term, "RAG")
         XCTAssertEqual(submission.context, "Used in agent architecture notes.")
         XCTAssertEqual(submission.status, .pending)
+    }
+
+    func testSearchRequestUsesServerDefaultStrategy() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let api = LexinetAPI(baseURL: URL(string: "http://lexinet.test")!, session: session)
+
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/search")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+
+            let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+            let items = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) })
+            XCTAssertEqual(items["q"], "redos")
+            XCTAssertEqual(items["limit"], "8")
+            XCTAssertEqual(items["scope"], "all")
+            XCTAssertNil(items["fuzzy"])
+            XCTAssertNil(items["threshold"])
+            XCTAssertNil(items["strategy"])
+            XCTAssertEqual(Set(items.keys), ["q", "limit", "scope"])
+
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let data = try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "search-strategy-provenance", withExtension: "json")))
+            return (response, data)
+        }
+        defer { MockURLProtocol.handler = nil }
+
+        let response = try await api.search(query: "redos")
+
+        XCTAssertEqual(response.strategy, "daily-driver")
+        XCTAssertEqual(response.results.first?.idea.canonicalName, "Redis")
     }
 
     private func decode<T: Decodable>(_ type: T.Type, fixture: String) throws -> T {

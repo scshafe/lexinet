@@ -4,6 +4,8 @@ public struct SearchResponse: Decodable, Equatable {
     public let query: String
     public let total: Int
     public let results: [SearchResult]
+    public let strategy: String?
+    public let provenance: SearchResponseProvenance?
 }
 
 public struct SearchResult: Decodable, Equatable, Identifiable {
@@ -13,7 +15,10 @@ public struct SearchResult: Decodable, Equatable, Identifiable {
     public let matchedField: String?
     public let matchedName: String?
     public let matchType: String?
+    public let matcher: String?
+    public let similarity: Double?
     public let headline: String?
+    public let provenance: SearchResultProvenance?
 
     public var id: String { idea.id }
 
@@ -24,8 +29,40 @@ public struct SearchResult: Decodable, Equatable, Identifiable {
         case matchedField = "matched_field"
         case matchedName = "matched_name"
         case matchType = "match_type"
+        case matcher
+        case similarity
         case headline
+        case provenance
     }
+}
+
+public struct SearchResponseProvenance: Decodable, Equatable {
+    public let strategy: String?
+    public let fuzzy: Bool?
+    public let threshold: Double?
+    public let matchers: [SearchMatcherConfig]?
+    public let overrides: SearchRequestOverrides?
+}
+
+public struct SearchMatcherConfig: Decodable, Equatable {
+    public let name: String?
+    public let enabled: Bool?
+    public let weight: Double?
+    public let threshold: Double?
+    public let priority: Int?
+}
+
+public struct SearchRequestOverrides: Decodable, Equatable {
+    public let fuzzy: Bool?
+    public let threshold: Double?
+}
+
+public struct SearchResultProvenance: Decodable, Equatable {
+    public let strategy: String?
+    public let matcher: String?
+    public let weight: Double?
+    public let threshold: Double?
+    public let priority: Int?
 }
 
 public struct IdeaSummary: Decodable, Equatable, Identifiable {

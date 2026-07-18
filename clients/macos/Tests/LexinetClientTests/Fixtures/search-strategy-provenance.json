@@ -1,0 +1,53 @@
+{
+  "query": "redos",
+  "scope": "all",
+  "fuzzy": true,
+  "total": 1,
+  "limit": 8,
+  "offset": 0,
+  "strategy": "daily-driver",
+  "provenance": {
+    "strategy": "daily-driver",
+    "fuzzy": true,
+    "threshold": 0.3,
+    "matchers": [
+      {
+        "name": "exact",
+        "enabled": true,
+        "weight": 1,
+        "priority": 0
+      },
+      {
+        "name": "fuzzy-name",
+        "enabled": true,
+        "weight": 0.5,
+        "threshold": 0.3,
+        "priority": 2
+      }
+    ]
+  },
+  "results": [
+    {
+      "idea": {
+        "id": "66666666-6666-6666-6666-666666666666",
+        "slug": "redis",
+        "canonical_name": "Redis",
+        "summary": "An in-memory data structure store."
+      },
+      "score": 0.42,
+      "matched_via": "name",
+      "matched_field": "names.text",
+      "matched_name": "Redis",
+      "match_type": "fuzzy",
+      "matcher": "fuzzy-name",
+      "similarity": 0.84,
+      "provenance": {
+        "strategy": "daily-driver",
+        "matcher": "fuzzy-name",
+        "weight": 0.5,
+        "threshold": 0.3,
+        "priority": 2
+      }
+    }
+  ]
+}
