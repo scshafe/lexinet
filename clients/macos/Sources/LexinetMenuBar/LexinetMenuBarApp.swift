@@ -73,33 +73,38 @@ final class LookupViewModel: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var captureState: CaptureState = .idle
 
-    private let api: LexinetAPI
+    private let api: LexinetAPI?
+    private let configurationErrorMessage: String?
 
     var canSubmitCapture: Bool {
-        !captureTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && captureState != .submitting
+        configurationErrorMessage == nil
+            && !captureTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && captureState != .submitting
     }
 
-    init(api: LexinetAPI = LexinetAPI(baseURL: LookupViewModel.configuredEndpoint())) {
+    init(api: LexinetAPI) {
         self.api = api
+        self.configurationErrorMessage = nil
     }
 
-    /// The service endpoint, overridable for a shared/tailnet lexicon: the LEXINET_ENDPOINT
-    /// environment variable wins, then the "endpoint" user default (`defaults write
-    /// dev.lexinet.menubar endpoint http://host:17892`), then the local default.
-    nonisolated static func configuredEndpoint() -> URL {
-        let fallback = URL(string: "http://127.0.0.1:17892")!
-        if let raw = ProcessInfo.processInfo.environment["LEXINET_ENDPOINT"],
-           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme != nil {
-            return url
+    init() {
+        do {
+            self.api = LexinetAPI(baseURL: try LexinetEndpointConfiguration.resolve())
+            self.configurationErrorMessage = nil
+        } catch {
+            let message = error.localizedDescription
+            self.api = nil
+            self.configurationErrorMessage = message
+            self.state = .failed(message)
+            self.captureState = .failed(message)
         }
-        if let raw = UserDefaults.standard.string(forKey: "endpoint"),
-           let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme != nil {
-            return url
-        }
-        return fallback
     }
 
     func search() async {
+        guard let api else {
+            state = .failed(configurationErrorMessage ?? "Lexinet endpoint is not configured.")
+            return
+        }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             state = .idle
@@ -109,7 +114,7 @@ final class LookupViewModel: ObservableObject {
         state = .loading
         do {
             let response = try await api.search(query: trimmed)
-            let selected = try await firstDetail(from: response.results)
+            let selected = try await firstDetail(from: response.results, using: api)
             state = .loaded(results: response.results, selected: selected)
         } catch let error as LexinetClientError {
             apply(error)
@@ -120,14 +125,25 @@ final class LookupViewModel: ObservableObject {
 
     func showSearch() {
         mode = .search
+        if let configurationErrorMessage {
+            state = .failed(configurationErrorMessage)
+        }
     }
 
     func showCapture() {
         mode = .capture
-        captureState = .idle
+        if let configurationErrorMessage {
+            captureState = .failed(configurationErrorMessage)
+        } else {
+            captureState = .idle
+        }
     }
 
     func submitCapture() async {
+        guard let api else {
+            captureState = .failed(configurationErrorMessage ?? "Lexinet endpoint is not configured.")
+            return
+        }
         guard canSubmitCapture else { return }
         captureState = .submitting
         do {
@@ -146,6 +162,10 @@ final class LookupViewModel: ObservableObject {
     }
 
     func select(_ result: SearchResult) async {
+        guard let api else {
+            state = .failed(configurationErrorMessage ?? "Lexinet endpoint is not configured.")
+            return
+        }
         do {
             let detail = try await api.ideaDetail(ref: result.idea.slug ?? result.idea.id)
             if case .loaded(let results, _) = state {
@@ -158,7 +178,7 @@ final class LookupViewModel: ObservableObject {
         }
     }
 
-    private func firstDetail(from results: [SearchResult]) async throws -> IdeaDetail? {
+    private func firstDetail(from results: [SearchResult], using api: LexinetAPI) async throws -> IdeaDetail? {
         guard let first = results.first else { return nil }
         return try await api.ideaDetail(ref: first.idea.slug ?? first.idea.id)
     }

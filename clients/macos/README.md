@@ -2,13 +2,13 @@
 
 This directory contains an optional native macOS menu-bar helper for lexinet. It is isolated from the Go module, Docker deployment, credentials, and OAuth flows.
 
-The app queries the existing service at `http://127.0.0.1:17892`, opens a menu-bar popover, searches ideas, captures submissions for later enrichment, and renders canonical name, names, definition, topics, and acronym-link summaries when the HTTP API returns them. If the service is down or returns a non-2xx response, the popover shows a clear error and keeps running.
+The app queries the configured lexinet service, opens a menu-bar popover, searches ideas, captures submissions for later enrichment, and renders canonical name, names, definition, topics, and acronym-link summaries when the HTTP API returns them. If configuration is invalid, the service is down, or the service returns a non-2xx response, the popover shows a clear error and keeps running.
 
 ## Requirements
 
 - macOS 13 or newer.
 - Xcode command line tools or Xcode with Swift 5.9+.
-- A running lexinet service on loopback.
+- A reachable lexinet service.
 
 ## Start lexinet
 
@@ -18,7 +18,20 @@ From the repository root or wherever the `lexinet` binary is installed:
 lexinet serve --tailnet off
 ```
 
-The menu-bar app expects the default service URL: `http://127.0.0.1:17892`.
+Without client configuration, the menu-bar app uses `http://127.0.0.1:17892`.
+
+## Configure the service endpoint
+
+The normal endpoint setting is `[server].url` in `~/.config/lexinet/config.toml`:
+
+```toml
+[server]
+url = "https://lexinet.example.ts.net"
+```
+
+Endpoint precedence is `LEXINET_ENDPOINT`, then `[server].url` in the file named by `LEXINET_CONFIG` or `~/.config/lexinet/config.toml`, then the legacy `endpoint` user default, then loopback. `LEXINET_ENDPOINT` is intended for an explicit launch or test override; a LaunchAgent does not need to contain the server address.
+
+The app reads endpoint configuration when it starts. Restart it after changing the file. A present but unreadable file, an invalid `server.url`, or an invalid environment override is shown as a configuration error instead of silently falling back to another endpoint.
 
 ## Build
 
@@ -93,7 +106,8 @@ To start the helper after login:
 1. Open macOS System Settings.
 2. Go to General > Login Items & Extensions.
 3. Add `~/Applications/LexinetMenuBar/LexinetMenuBar` or the packaged `.app` if you created one.
-4. Keep `lexinet serve --tailnet off` managed separately, for example with your preferred shell profile, launchd user agent, or manual startup.
+4. Keep the endpoint in `~/.config/lexinet/config.toml`; the login item or LaunchAgent only needs to launch the binary.
+5. Keep `lexinet serve --tailnet off` managed separately, for example with your preferred shell profile, launchd user agent, or manual startup.
 
 ## Self-Update
 
