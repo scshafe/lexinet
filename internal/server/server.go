@@ -31,6 +31,39 @@ type Config struct {
 	TailnetStateDir  string
 }
 
+const ErrorCodeTailnetAuthTokenRequired = "CONFIG.TAILNET_AUTH_TOKEN_REQUIRED"
+
+// ConfigurationError describes a stable, machine-readable server configuration failure.
+type ConfigurationError struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Context map[string]any `json:"context"`
+}
+
+func (e *ConfigurationError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code + ": " + e.Message
+}
+
+// ValidateConfiguration rejects unsafe effective server configurations before external work.
+// It returns a ConfigurationError with a stable code and never includes bearer-token material.
+// @canonical server_configuration_validation -- all server startup paths must use this function.
+func ValidateConfiguration(cfg Config) error {
+	if cfg.TailnetEnabled && strings.TrimSpace(cfg.AuthToken) == "" {
+		return &ConfigurationError{
+			Code:    ErrorCodeTailnetAuthTokenRequired,
+			Message: "service.auth_token must be non-empty when service.tailnet_enabled is true",
+			Context: map[string]any{
+				"configuration_field": "service.auth_token",
+				"tailnet_enabled":     true,
+			},
+		}
+	}
+	return nil
+}
+
 type ErrorEnvelope struct {
 	Error APIError `json:"error"`
 }
@@ -68,6 +101,9 @@ func Router(cfg Config, store Store) http.Handler {
 }
 
 func Serve(ctx context.Context, cfg Config) error {
+	if err := ValidateConfiguration(cfg); err != nil {
+		return err
+	}
 	if cfg.ListenLoopback == "" {
 		cfg.ListenLoopback = "127.0.0.1:17892"
 	}

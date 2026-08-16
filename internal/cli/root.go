@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"lexinet/internal/server"
 )
 
 const (
@@ -85,7 +87,7 @@ func NewRoot(opts *Options) *cobra.Command {
 		newLinkCommand(opts),
 		newTraverseCommand(opts),
 		newSearchCommand(opts),
-		newServeCommand(opts),
+		newServeCommand(opts, productionServeCommandRuntime()),
 		newMigrateCommand(opts),
 		newPingCommand(opts),
 		newVersionCommand(opts),
@@ -104,6 +106,18 @@ func exitCode(err error) int {
 
 func writeCLIError(w io.Writer, jsonOut bool, code int, err error) {
 	if jsonOut {
+		var configurationError *server.ConfigurationError
+		if errors.As(err, &configurationError) {
+			_ = writeJSON(w, map[string]any{
+				"error": map[string]any{
+					"code":      configurationError.Code,
+					"message":   configurationError.Message,
+					"context":   configurationError.Context,
+					"exit_code": code,
+				},
+			})
+			return
+		}
 		var serviceErr *ServiceError
 		if errors.As(err, &serviceErr) {
 			errorValue := map[string]any{

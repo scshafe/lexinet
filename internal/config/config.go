@@ -58,6 +58,7 @@ type DatabaseConfig struct {
 	DSN string `toml:"dsn" json:"dsn"`
 }
 
+// Default returns the loopback-only built-in configuration.
 func Default() Config {
 	return Config{
 		Server: ServerConfig{
@@ -77,7 +78,7 @@ func Default() Config {
 		Service: ServiceConfig{
 			ListenLoopback:  DefaultListen,
 			AuthToken:       "",
-			TailnetEnabled:  true,
+			TailnetEnabled:  false,
 			TailnetHostname: "lexinet",
 			TailnetStateDir: "~/.config/lexinet/tsnet-state",
 			Database: DatabaseConfig{

@@ -8,6 +8,16 @@ import (
 	searchcfg "lexinet/internal/search"
 )
 
+func TestDefaultServerConfigurationAllowsLoopbackWithoutBearer(t *testing.T) {
+	cfg := Default()
+	if cfg.Service.TailnetEnabled {
+		t.Fatal("default configuration enables Tailnet, want loopback-only default")
+	}
+	if cfg.Service.AuthToken != "" {
+		t.Fatal("default service bearer is non-empty, want optional loopback bearer")
+	}
+}
+
 func TestDefaultSearchConfigSelectsDailyDriver(t *testing.T) {
 	cfg := Default()
 	provider := cfg.Search.StrategyProvider()

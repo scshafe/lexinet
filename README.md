@@ -20,7 +20,7 @@ The project ships as one Go 1.23.4 binary named `lexinet`:
 - Configurable exact, prefix, full-text, and trigram fuzzy search strategies.
 - Optional native macOS menu-bar lookup helper in `clients/macos`.
 - Agent-friendly CLI with `--json`, typed exit codes, stdin body support, and non-interactive destructive guards.
-- Optional bearer auth for service routes other than `/healthz` and `/version`.
+- Optional bearer auth for loopback-only service routes, and mandatory bearer auth whenever Lexinet's native Tailnet listener is enabled; `/healthz` and `/version` remain public.
 
 ## Build
 
@@ -56,6 +56,8 @@ tailnet_enabled = false
 [service.database]
 dsn = "postgres://lexinet@127.0.0.1:5432/lexinet?sslmode=disable"
 ```
+
+The built-in service default is loopback-only with `tailnet_enabled = false`, so local development may leave `service.auth_token` empty. Enabling Lexinet's native Tailnet listener requires a nonempty, non-whitespace `service.auth_token`; an unsafe effective configuration fails before migrations, database access, or listener startup. This validation cannot detect an external TCP proxy aimed at the loopback listener; configure the bearer before exposing Lexinet through `tailscale serve --tcp` or any other proxy.
 
 ### Search Strategy Configuration
 

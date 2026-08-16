@@ -95,7 +95,19 @@ func newMigrateCommand(opts *Options) *cobra.Command {
 	return cmd
 }
 
-func newServeCommand(opts *Options) *cobra.Command {
+type serveCommandRuntime struct {
+	migrate func(context.Context, string) error
+	serve   func(context.Context, server.Config) error
+}
+
+func productionServeCommandRuntime() serveCommandRuntime {
+	return serveCommandRuntime{
+		migrate: storage.Migrate,
+		serve:   server.Serve,
+	}
+}
+
+func newServeCommand(opts *Options, runtime serveCommandRuntime) *cobra.Command {
 	var bind string
 	var port int
 	var db string
@@ -131,15 +143,7 @@ func newServeCommand(opts *Options) *cobra.Command {
 			default:
 				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("invalid --tailnet %q", tailnetMode)}
 			}
-			if !skipMigrate {
-				if err := storage.Migrate(cmd.Context(), cfg.Service.Database.DSN); err != nil {
-					return err
-				}
-			}
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			fmt.Fprintf(cmd.ErrOrStderr(), "serving loopback on %s\n", cfg.Service.ListenLoopback)
-			return server.Serve(ctx, server.Config{
+			effectiveServerConfig := server.Config{
 				Version:          opts.Version,
 				ListenLoopback:   cfg.Service.ListenLoopback,
 				AuthToken:        cfg.Service.AuthToken,
@@ -148,7 +152,19 @@ func newServeCommand(opts *Options) *cobra.Command {
 				TailnetEnabled:   cfg.Service.TailnetEnabled,
 				TailnetHostname:  cfg.Service.TailnetHostname,
 				TailnetStateDir:  cfg.Service.TailnetStateDir,
-			})
+			}
+			if err := server.ValidateConfiguration(effectiveServerConfig); err != nil {
+				return &ExitError{Code: ExitValidation, Err: err}
+			}
+			if !skipMigrate {
+				if err := runtime.migrate(cmd.Context(), cfg.Service.Database.DSN); err != nil {
+					return err
+				}
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			fmt.Fprintf(cmd.ErrOrStderr(), "serving loopback on %s\n", cfg.Service.ListenLoopback)
+			return runtime.serve(ctx, effectiveServerConfig)
 		},
 	}
 	cmd.Flags().StringVar(&bind, "bind", "", "loopback listen address")

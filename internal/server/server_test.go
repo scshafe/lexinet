@@ -17,6 +17,53 @@ import (
 	"lexinet/internal/storage"
 )
 
+func TestValidateConfigurationRejectsTailnetWithoutBearer(t *testing.T) {
+	for _, token := range []string{"", " \t\n "} {
+		err := ValidateConfiguration(Config{AuthToken: token, TailnetEnabled: true})
+
+		var configurationError *ConfigurationError
+		if !errors.As(err, &configurationError) {
+			t.Fatalf("error = %T %v, want *ConfigurationError", err, err)
+		}
+		if configurationError.Code != ErrorCodeTailnetAuthTokenRequired {
+			t.Fatalf("error code = %q, want %q", configurationError.Code, ErrorCodeTailnetAuthTokenRequired)
+		}
+		if configurationError.Context["configuration_field"] != "service.auth_token" {
+			t.Fatalf("configuration field context = %#v, want service.auth_token", configurationError.Context["configuration_field"])
+		}
+		if configurationError.Context["tailnet_enabled"] != true {
+			t.Fatalf("tailnet context = %#v, want true", configurationError.Context["tailnet_enabled"])
+		}
+		if got, want := err.Error(), "CONFIG.TAILNET_AUTH_TOKEN_REQUIRED: service.auth_token must be non-empty when service.tailnet_enabled is true"; got != want {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestValidateConfigurationAllowsTailnetDisabledWithoutBearer(t *testing.T) {
+	if err := ValidateConfiguration(Config{AuthToken: " \t\n ", TailnetEnabled: false}); err != nil {
+		t.Fatalf("validate Tailnet-disabled configuration: %v", err)
+	}
+}
+
+func TestServeRejectsUnsafeTailnetConfigurationBeforeDatabaseOrListenerWork(t *testing.T) {
+	err := Serve(context.Background(), Config{
+		AuthToken:       " \t\n ",
+		TailnetEnabled:  true,
+		DatabaseDSN:     ":// invalid database DSN",
+		ListenLoopback:  "invalid listen address",
+		TailnetHostname: "unsafe-test",
+	})
+
+	var configurationError *ConfigurationError
+	if !errors.As(err, &configurationError) {
+		t.Fatalf("error = %T %v, want *ConfigurationError", err, err)
+	}
+	if configurationError.Code != ErrorCodeTailnetAuthTokenRequired {
+		t.Fatalf("error code = %q, want %q", configurationError.Code, ErrorCodeTailnetAuthTokenRequired)
+	}
+}
+
 func TestOpenRoutesBypassAuth(t *testing.T) {
 	router := Router(Config{Version: "test", AuthToken: "secret"}, fakeStore{})
 	rec := httptest.NewRecorder()
