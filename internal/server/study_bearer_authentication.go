@@ -27,7 +27,10 @@ func requireStudyBearerAuthentication(configuredToken string) func(http.Handler)
 
 			principal := model.OperatorStudyPrincipalID()
 			ctx := context.WithValue(r.Context(), studyPrincipalContextKey{}, principal)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			detached := r.Clone(ctx)
+			detached.Header = r.Header.Clone()
+			detached.Header.Del("Authorization")
+			next.ServeHTTP(w, detached)
 		})
 	}
 }

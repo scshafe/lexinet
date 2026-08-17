@@ -11,12 +11,32 @@ import (
 	"lexinet/internal/studysession"
 )
 
-// StudySessionService is the complete HTTP-facing study capability. Handlers
-// call exactly one method and never receive repository or transaction access.
-type StudySessionService interface {
+type studyCreateOrResumeService interface {
 	CreateOrResume(context.Context, model.StudyPrincipalID, studysession.StudyCreateSessionRequest) (*studysession.StudyCreateSessionResult, error)
+}
+
+type studyGetService interface {
 	Get(context.Context, model.StudyPrincipalID, uuid.UUID, studysession.StudyPageRequest) (*studysession.StudyGetSessionResult, error)
+}
+
+type studySyncService interface {
 	Sync(context.Context, model.StudyPrincipalID, uuid.UUID, studysession.StudySyncRequest) (*studysession.StudySyncResult, error)
+}
+
+// StudySessionService is the complete loopback HTTP-facing study capability.
+// Handlers call exactly one method and never receive repository or transaction
+// access.
+type StudySessionService interface {
+	studyCreateOrResumeService
+	studyGetService
+	studySyncService
+}
+
+// TailnetStudySessionService is the structurally narrower appliance surface.
+// It intentionally omits operator-only GET/state access.
+type TailnetStudySessionService interface {
+	studyCreateOrResumeService
+	studySyncService
 }
 
 func registerStudyAPIRoutes(router chi.Router, service StudySessionService) {
@@ -31,7 +51,7 @@ func registerStudyAPIRoutes(router chi.Router, service StudySessionService) {
 	})
 }
 
-func createOrResumeStudySessionHandler(service StudySessionService) http.HandlerFunc {
+func createOrResumeStudySessionHandler(service studyCreateOrResumeService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := studyPrincipalFromContext(r.Context())
 		if !ok {
@@ -60,7 +80,7 @@ func createOrResumeStudySessionHandler(service StudySessionService) http.Handler
 	}
 }
 
-func getStudySessionHandler(service StudySessionService) http.HandlerFunc {
+func getStudySessionHandler(service studyGetService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := studyPrincipalFromContext(r.Context())
 		if !ok {
@@ -90,7 +110,7 @@ func getStudySessionHandler(service StudySessionService) http.HandlerFunc {
 	}
 }
 
-func syncStudySessionHandler(service StudySessionService) http.HandlerFunc {
+func syncStudySessionHandler(service studySyncService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := studyPrincipalFromContext(r.Context())
 		if !ok {

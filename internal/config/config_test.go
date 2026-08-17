@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	searchcfg "lexinet/internal/search"
@@ -15,6 +16,69 @@ func TestDefaultServerConfigurationAllowsLoopbackWithoutBearer(t *testing.T) {
 	}
 	if cfg.Service.AuthToken != "" {
 		t.Fatal("default service bearer is non-empty, want optional loopback bearer")
+	}
+	if !reflect.DeepEqual(cfg.Service.TailnetStudyAuthentication, TailnetStudyAuthenticationConfig{}) {
+		t.Fatalf("default Tailnet study authentication = %#v, want unconfigured", cfg.Service.TailnetStudyAuthentication)
+	}
+}
+
+func TestLoadFileParsesTailnetStudyAuthenticationPolicyWithoutCredentialBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := `[service]
+tailnet_enabled = true
+tailnet_hostname = "lexinet-study"
+tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+mode = "tailnet_node"
+required_node_tag = "tag:embedded-house-panel"
+application_capability = "example.invalid/cap/lexinet-study-v1"
+allowed_profile_refs = ["learner.primary", "learner.secondary"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	authentication := cfg.Service.TailnetStudyAuthentication
+	if authentication.Mode != "tailnet_node" ||
+		authentication.RequiredNodeTag != "tag:embedded-house-panel" ||
+		authentication.ApplicationCapability != "example.invalid/cap/lexinet-study-v1" ||
+		len(authentication.AllowedProfileRefs) != 2 ||
+		authentication.AllowedProfileRefs[0] != "learner.primary" ||
+		authentication.AllowedProfileRefs[1] != "learner.secondary" ||
+		authentication.ScopedTokenSubjectID != "" || authentication.ScopedTokenFile != "" {
+		t.Fatalf("Tailnet study authentication = %#v", authentication)
+	}
+}
+
+func TestConfigSetUpdatesTailnetStudyAuthenticationPolicy(t *testing.T) {
+	cfg := Default()
+	sets := map[string]string{
+		"service.tailnet_study_authentication.mode":                    "scoped_token",
+		"service.tailnet_study_authentication.allowed_profile_refs":    "learner.primary, learner.secondary",
+		"service.tailnet_study_authentication.scoped_token_subject_id": "11111111-1111-1111-1111-111111111111",
+		"service.tailnet_study_authentication.scoped_token_file":       "/run/secrets/lexinet-study-token",
+	}
+	for key, value := range sets {
+		if err := cfg.Set(key, value); err != nil {
+			t.Fatalf("Set(%s): %v", key, err)
+		}
+	}
+	authentication := cfg.Service.TailnetStudyAuthentication
+	if authentication.Mode != "scoped_token" ||
+		authentication.ScopedTokenSubjectID != "11111111-1111-1111-1111-111111111111" ||
+		authentication.ScopedTokenFile != "/run/secrets/lexinet-study-token" ||
+		len(authentication.AllowedProfileRefs) != 2 ||
+		authentication.AllowedProfileRefs[0] != "learner.primary" ||
+		authentication.AllowedProfileRefs[1] != "learner.secondary" {
+		t.Fatalf("Tailnet study authentication = %#v", authentication)
+	}
+	if err := cfg.Set("service.tailnet_study_authentication.allowed_profile_refs", "learner.primary,"); err == nil {
+		t.Fatal("empty Tailnet profile-list value was accepted")
 	}
 }
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -97,13 +98,15 @@ func newMigrateCommand(opts *Options) *cobra.Command {
 
 type serveCommandRuntime struct {
 	migrate func(context.Context, string) error
-	serve   func(context.Context, server.Config) error
+	prepare func(server.Config) (*server.PreparedConfiguration, error)
+	serve   func(context.Context, *server.PreparedConfiguration) error
 }
 
 func productionServeCommandRuntime() serveCommandRuntime {
 	return serveCommandRuntime{
 		migrate: storage.Migrate,
-		serve:   server.Serve,
+		prepare: server.PrepareConfiguration,
+		serve:   server.ServePrepared,
 	}
 }
 
@@ -117,6 +120,9 @@ func newServeCommand(opts *Options, runtime serveCommandRuntime) *cobra.Command 
 		Use:   "serve",
 		Short: "Run the lexinet HTTP service",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if runtime.prepare == nil || runtime.migrate == nil || runtime.serve == nil {
+				return &ExitError{Code: ExitValidation, Err: errors.New("serve runtime is unavailable")}
+			}
 			cfg, _, err := config.Load()
 			if err != nil {
 				return err
@@ -144,16 +150,23 @@ func newServeCommand(opts *Options, runtime serveCommandRuntime) *cobra.Command 
 				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("invalid --tailnet %q", tailnetMode)}
 			}
 			effectiveServerConfig := server.Config{
-				Version:          opts.Version,
-				ListenLoopback:   cfg.Service.ListenLoopback,
-				AuthToken:        cfg.Service.AuthToken,
-				DatabaseDSN:      cfg.Service.Database.DSN,
-				SearchStrategies: cfg.Search.StrategyProvider(),
-				TailnetEnabled:   cfg.Service.TailnetEnabled,
-				TailnetHostname:  cfg.Service.TailnetHostname,
-				TailnetStateDir:  cfg.Service.TailnetStateDir,
+				Version:                      opts.Version,
+				ListenLoopback:               cfg.Service.ListenLoopback,
+				AuthToken:                    cfg.Service.AuthToken,
+				DatabaseDSN:                  cfg.Service.Database.DSN,
+				SearchStrategies:             cfg.Search.StrategyProvider(),
+				TailnetEnabled:               cfg.Service.TailnetEnabled,
+				TailnetHostname:              cfg.Service.TailnetHostname,
+				TailnetStateDir:              cfg.Service.TailnetStateDir,
+				TailnetAuthenticationMode:    cfg.Service.TailnetStudyAuthentication.Mode,
+				TailnetRequiredNodeTag:       cfg.Service.TailnetStudyAuthentication.RequiredNodeTag,
+				TailnetApplicationCapability: cfg.Service.TailnetStudyAuthentication.ApplicationCapability,
+				TailnetAllowedProfileRefs:    append([]string(nil), cfg.Service.TailnetStudyAuthentication.AllowedProfileRefs...),
+				TailnetScopedTokenSubjectID:  cfg.Service.TailnetStudyAuthentication.ScopedTokenSubjectID,
+				TailnetScopedTokenFile:       cfg.Service.TailnetStudyAuthentication.ScopedTokenFile,
 			}
-			if err := server.ValidateConfiguration(effectiveServerConfig); err != nil {
+			preparedServer, err := runtime.prepare(effectiveServerConfig)
+			if err != nil {
 				return &ExitError{Code: ExitValidation, Err: err}
 			}
 			if !skipMigrate {
@@ -164,7 +177,7 @@ func newServeCommand(opts *Options, runtime serveCommandRuntime) *cobra.Command 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			fmt.Fprintf(cmd.ErrOrStderr(), "serving loopback on %s\n", cfg.Service.ListenLoopback)
-			return runtime.serve(ctx, effectiveServerConfig)
+			return runtime.serve(ctx, preparedServer)
 		},
 	}
 	cmd.Flags().StringVar(&bind, "bind", "", "loopback listen address")

@@ -73,3 +73,31 @@ func TestStudyBearerAuthenticationInjectsOnlyOperatorPrincipal(t *testing.T) {
 		t.Fatalf("service calls = %d, want 1", got)
 	}
 }
+
+func TestStudyBearerAuthenticationDoesNotPassCredentialBytesInward(t *testing.T) {
+	const token = "loopback-operator-token-canary"
+	called := false
+	handler := requireStudyBearerAuthentication(token)(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		called = true
+		if got := request.Header.Get("Authorization"); got != "" {
+			t.Fatalf("downstream Authorization = %q, want empty", got)
+		}
+		principal, ok := studyPrincipalFromContext(request.Context())
+		if !ok || principal != model.OperatorStudyPrincipalID() {
+			t.Fatalf("downstream principal = %q ok=%v, want operator", principal.String(), ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/study/sessions", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if !called || response.Code != http.StatusNoContent {
+		t.Fatalf("called=%v status=%d, want called and 204", called, response.Code)
+	}
+	if got := request.Header.Get("Authorization"); got != "Bearer "+token {
+		t.Fatalf("source request was mutated: %q", got)
+	}
+}
