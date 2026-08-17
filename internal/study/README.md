@@ -25,7 +25,15 @@ Policy constructors bind the exact name, version, and ordered configuration
 parts before planning. A zero-value scheduler fails closed. Plan errors contain
 only allowlisted operation, field, and reason metadata; card identities,
 profile identities, source content, and seeds are never copied into error
-context.
+context. `StudyMaximumSchedulingCards` is the exported current per-plan work
+bound; composition must reject larger snapshots rather than attempting an
+unbounded map allocation or sort.
+
+A scheduler result is a pure proposal, not persistence authority. Composition
+must invoke schedulers through the materializer's authority-owning deep-copy
+and output-validation boundary. Direct extension calls may be useful in tests
+and shadow evaluation, but their output must never be written as an issued
+cycle without that materializer validation.
 
 ## Boundary behavior
 

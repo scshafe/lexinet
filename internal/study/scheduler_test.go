@@ -1,6 +1,7 @@
 package study
 
 import (
+	"encoding/binary"
 	"errors"
 	"reflect"
 	"strings"
@@ -143,6 +144,41 @@ func TestSchedulerSnapshotValidationIsStructuredAndRedacted(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStudySchedulerAcceptsMaximumCardWorkBound(t *testing.T) {
+	scheduler := mustVarietyFirstV1(t)
+	cards := make([]StudySchedulingCard, StudyMaximumSchedulingCards)
+	for index := range cards {
+		var identity uuid.UUID
+		identity[6] = 0x40
+		binary.BigEndian.PutUint64(identity[8:], uint64(index+1))
+		identity[8] = 0x80
+		cards[index].CardIdentity = identity
+	}
+
+	plan, err := scheduler.Plan(testSchedulingSnapshot(cards...))
+	if err != nil {
+		t.Fatalf("plan exact scheduler work bound: %v", err)
+	}
+	if len(plan.Cards) != StudyMaximumSchedulingCards {
+		t.Fatalf("planned card count = %d, want %d", len(plan.Cards), StudyMaximumSchedulingCards)
+	}
+}
+
+func TestStudySchedulerRejectsOverCardWorkBoundBeforeProjectionValidation(t *testing.T) {
+	scheduler := mustVarietyFirstV1(t)
+	// Zero-valued cards prove the work-bound check runs before identity maps or
+	// per-projection validation. The slice itself is the only required fixture.
+	cards := make([]StudySchedulingCard, StudyMaximumSchedulingCards+1)
+	_, err := scheduler.Plan(testSchedulingSnapshot(cards...))
+	var studyError *model.StudyError
+	if !errors.As(err, &studyError) || studyError.Code != model.StudyErrorCodeRequestTooLarge {
+		t.Fatalf("over-bound error = %#v", err)
+	}
+	if studyError.Context["field"] != "cards" || studyError.Context["reason"] != "work_bound_exceeded" {
+		t.Fatalf("over-bound context = %#v", studyError.Context)
 	}
 }
 

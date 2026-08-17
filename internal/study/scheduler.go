@@ -12,6 +12,10 @@ import (
 )
 
 const (
+	// StudyMaximumSchedulingCards is the explicit current CPU/memory work bound
+	// for one pure scheduling invocation.
+	StudyMaximumSchedulingCards = 65_536
+
 	VarietyFirstV1Name    = "variety_first_v1"
 	VarietyFirstV1Version = "1"
 	ShuffleBagV1Name      = "shuffle_bag_v1"
@@ -128,6 +132,9 @@ func (identity schedulerIdentity) provenance(snapshot StudySchedulingSnapshot) m
 }
 
 func validateStudySchedulingSnapshot(snapshot StudySchedulingSnapshot, operation string) error {
+	if len(snapshot.Cards) > StudyMaximumSchedulingCards {
+		return newSchedulerError(model.StudyErrorCodeRequestTooLarge, "study scheduler card count exceeds the current work bound", operation, "cards", "work_bound_exceeded", nil)
+	}
 	if snapshot.LearnerProfileID == uuid.Nil {
 		return newSchedulerError(model.StudyErrorCodeSchemaInvalid, "study scheduler profile is required", operation, "learner_profile_id", "invalid_snapshot", nil)
 	}
