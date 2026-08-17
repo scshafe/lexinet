@@ -23,9 +23,17 @@ type contractManifest struct {
 }
 
 type manifestExample struct {
-	Path     string `json:"path"`
-	Schema   string `json:"schema"`
-	Expected string `json:"expected"`
+	Path             string                    `json:"path"`
+	Schema           string                    `json:"schema"`
+	Expected         string                    `json:"expected"`
+	SyncAdjudication *syncAdjudicationScenario `json:"sync_adjudication,omitempty"`
+}
+
+type syncAdjudicationScenario struct {
+	ReplayPrefixThroughSequence   int      `json:"replay_prefix_through_sequence"`
+	NewSuffixOutcome              string   `json:"new_suffix_outcome"`
+	FirstFailureCode              string   `json:"first_failure_code,omitempty"`
+	RequiredNewSuffixDispositions []string `json:"required_new_suffix_dispositions"`
 }
 
 func TestStudyV1CanonicalRequestAndResponseSchemasCompile(t *testing.T) {
@@ -174,6 +182,151 @@ func TestStudyV1ManifestMatchesCanonicalIdentity(t *testing.T) {
 	}
 }
 
+func TestStudyV1DeclaresAtomicSuffixAndScopedSyncReplayStability(t *testing.T) {
+	directory := contractDirectory(t)
+	manifest := loadManifest(t, directory)
+	document := loadJSONObject(t, filepath.Join(directory, manifest.OpenAPIPath))
+	extension := requiredObject(t, document, "x-lexinet-contract")
+
+	adjudication := requiredObject(t, extension, "sync_adjudication")
+	wantPartition := []string{"immutable_replay_prefix", "one_new_contiguous_suffix"}
+	if got := stringSlice(t, adjudication["request_partition"], "sync_adjudication.request_partition"); !reflect.DeepEqual(got, wantPartition) {
+		t.Fatalf("unexpected sync partition: got=%v want=%v", got, wantPartition)
+	}
+	wantSuccessDispositions := []string{"accepted", "semantic_duplicate"}
+	if got := stringSlice(t, adjudication["successful_new_suffix_dispositions"], "sync_adjudication.successful_new_suffix_dispositions"); !reflect.DeepEqual(got, wantSuccessDispositions) {
+		t.Fatalf("unexpected successful suffix dispositions: got=%v want=%v", got, wantSuccessDispositions)
+	}
+	terminal := requiredObject(t, adjudication, "terminal_domain_failure")
+	for key, want := range map[string]string{
+		"applies_to":          "every_new_suffix_sequence",
+		"receipt_disposition": "terminal_rejected",
+		"receipt_code_source": "first_failure_code",
+	} {
+		if got, _ := terminal[key].(string); got != want {
+			t.Fatalf("unexpected terminal-domain-failure %s: got=%q want=%q", key, got, want)
+		}
+	}
+	for _, key := range []string{"commits_canonical_events", "allocates_profile_ingestion_ordinals"} {
+		if got, ok := terminal[key].(bool); !ok || got {
+			t.Fatalf("terminal-domain-failure %s must be false, got=%v", key, terminal[key])
+		}
+	}
+
+	idempotency := requiredObject(t, extension, "idempotency")
+	replay := requiredObject(t, idempotency, "identical_sync_replay")
+	wantPreserved := []string{"receipts", "flush_receipt", "session.page"}
+	if got := stringSlice(t, replay["preserved_response_members"], "idempotency.identical_sync_replay.preserved_response_members"); !reflect.DeepEqual(got, wantPreserved) {
+		t.Fatalf("unexpected preserved replay members: got=%v want=%v", got, wantPreserved)
+	}
+	if got, ok := replay["live_session_envelope_may_advance"].(bool); !ok || !got {
+		t.Fatalf("identical sync replay must permit a live session envelope, got=%v", replay["live_session_envelope_may_advance"])
+	}
+	if got, ok := replay["whole_response_byte_stable"].(bool); !ok || got {
+		t.Fatalf("identical sync replay must not claim whole-response byte stability, got=%v", replay["whole_response_byte_stable"])
+	}
+}
+
+func TestStudyV1GoldenSyncExamplesEnforceAtomicNewSuffix(t *testing.T) {
+	directory := contractDirectory(t)
+	manifest := loadManifest(t, directory)
+	found := map[string]bool{
+		"examples/sync-rated-and-voided.json":                           false,
+		"examples/sync-new-suffix-mixed-success.json":                   false,
+		"examples/sync-replay-prefix-then-grouped-terminal-suffix.json": false,
+	}
+
+	for _, example := range manifest.Examples {
+		if example.Schema != "SyncResource" || example.Expected != "valid" {
+			continue
+		}
+		if example.SyncAdjudication == nil {
+			t.Fatalf("sync example %s does not declare its replay-prefix boundary", example.Path)
+		}
+		scenario := example.SyncAdjudication
+		resource := loadJSONObject(t, filepath.Join(directory, example.Path))
+		receipts := objectSlice(t, resource["receipts"], example.Path+".receipts")
+		if len(receipts) == 0 {
+			t.Fatalf("sync example %s has no executable receipts", example.Path)
+		}
+
+		var suffix []map[string]any
+		for index, receipt := range receipts {
+			sequence := integerValue(t, receipt["client_sequence"], fmt.Sprintf("%s.receipts[%d].client_sequence", example.Path, index))
+			if sequence != index+1 {
+				t.Fatalf("sync example %s receipts are not contiguous from sequence 1: index=%d sequence=%d", example.Path, index, sequence)
+			}
+			if sequence > scenario.ReplayPrefixThroughSequence {
+				suffix = append(suffix, receipt)
+			}
+		}
+		if scenario.ReplayPrefixThroughSequence < 0 || scenario.ReplayPrefixThroughSequence >= len(receipts) {
+			t.Fatalf("sync example %s must contain a nonempty new suffix after replay prefix %d", example.Path, scenario.ReplayPrefixThroughSequence)
+		}
+		if got := integerValue(t, suffix[0]["client_sequence"], example.Path+".new_suffix.first_sequence"); got != scenario.ReplayPrefixThroughSequence+1 {
+			t.Fatalf("sync example %s new suffix begins at %d, want %d", example.Path, got, scenario.ReplayPrefixThroughSequence+1)
+		}
+		lastSequence := integerValue(t, receipts[len(receipts)-1]["client_sequence"], example.Path+".receipts.last.client_sequence")
+		if got := integerValue(t, resource["adjudicated_through_sequence"], example.Path+".adjudicated_through_sequence"); got != lastSequence {
+			t.Fatalf("sync example %s adjudicated through %d, want %d", example.Path, got, lastSequence)
+		}
+		flush := requiredObject(t, resource, "flush_receipt")
+		if got := integerValue(t, flush["acknowledged_through_sequence"], example.Path+".flush_receipt.acknowledged_through_sequence"); got != lastSequence {
+			t.Fatalf("sync example %s flush acknowledges %d, want %d", example.Path, got, lastSequence)
+		}
+
+		observedDispositions := uniqueReceiptDispositions(t, suffix, example.Path)
+		if !reflect.DeepEqual(observedDispositions, scenario.RequiredNewSuffixDispositions) {
+			t.Fatalf("sync example %s new suffix dispositions got=%v want=%v", example.Path, observedDispositions, scenario.RequiredNewSuffixDispositions)
+		}
+		switch scenario.NewSuffixOutcome {
+		case "committed":
+			if scenario.FirstFailureCode != "" {
+				t.Fatalf("committed sync example %s unexpectedly declares a failure code", example.Path)
+			}
+			for index, receipt := range suffix {
+				disposition, _ := receipt["disposition"].(string)
+				if disposition != "accepted" && disposition != "semantic_duplicate" {
+					t.Fatalf("committed sync example %s suffix[%d] has %q", example.Path, index, disposition)
+				}
+			}
+		case "terminal_rejected":
+			if scenario.FirstFailureCode == "" {
+				t.Fatalf("terminal sync example %s omits its first failure code", example.Path)
+			}
+			for index, receipt := range suffix {
+				if got, _ := receipt["disposition"].(string); got != "terminal_rejected" {
+					t.Fatalf("terminal sync example %s suffix[%d] disposition=%q", example.Path, index, got)
+				}
+				if got, _ := receipt["code"].(string); got != scenario.FirstFailureCode {
+					t.Fatalf("terminal sync example %s suffix[%d] code=%q want=%q", example.Path, index, got, scenario.FirstFailureCode)
+				}
+				if receipt["canonical_event_id"] != nil || receipt["profile_ingestion_ordinal"] != nil {
+					t.Fatalf("terminal sync example %s suffix[%d] committed an event identity or ingestion ordinal", example.Path, index)
+				}
+			}
+		default:
+			t.Fatalf("sync example %s declares unsupported new suffix outcome %q", example.Path, scenario.NewSuffixOutcome)
+		}
+
+		if _, required := found[example.Path]; required {
+			found[example.Path] = true
+		}
+		if example.Path == "examples/sync-rated-and-voided.json" && (scenario.ReplayPrefixThroughSequence != 4 || len(suffix) != 1) {
+			t.Fatalf("legacy sync mix must remain replay sequences 1-4 plus sole new sequence 5")
+		}
+		if example.Path == "examples/sync-replay-prefix-then-grouped-terminal-suffix.json" && len(suffix) < 2 {
+			t.Fatalf("grouped terminal suffix fixture must exercise more than one new sequence")
+		}
+	}
+
+	for path, present := range found {
+		if !present {
+			t.Fatalf("manifest omits required atomic-sync example %s", path)
+		}
+	}
+}
+
 func TestStudyV1UsesRawSuccessResources(t *testing.T) {
 	directory := contractDirectory(t)
 	manifest := loadManifest(t, directory)
@@ -300,6 +453,63 @@ func stringSlice(t *testing.T, value any, field string) []string {
 			t.Fatalf("%s[%d] is not a string", field, index)
 		}
 		result = append(result, text)
+	}
+	return result
+}
+
+func objectSlice(t *testing.T, value any, field string) []map[string]any {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("required member %s is not an array", field)
+	}
+	result := make([]map[string]any, 0, len(items))
+	for index, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("%s[%d] is not an object", field, index)
+		}
+		result = append(result, object)
+	}
+	return result
+}
+
+func integerValue(t *testing.T, value any, field string) int {
+	t.Helper()
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Int64()
+		if err != nil {
+			t.Fatalf("required member %s is not an integer: %v", field, err)
+		}
+		return int(parsed)
+	case int:
+		return number
+	case float64:
+		integer := int(number)
+		if float64(integer) != number {
+			t.Fatalf("required member %s is not an integer", field)
+		}
+		return integer
+	default:
+		t.Fatalf("required member %s is not numeric: %T", field, value)
+		return 0
+	}
+}
+
+func uniqueReceiptDispositions(t *testing.T, receipts []map[string]any, field string) []string {
+	t.Helper()
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(receipts))
+	for index, receipt := range receipts {
+		disposition, ok := receipt["disposition"].(string)
+		if !ok || disposition == "" {
+			t.Fatalf("%s.new_suffix[%d].disposition is not a nonempty string", field, index)
+		}
+		if !seen[disposition] {
+			seen[disposition] = true
+			result = append(result, disposition)
+		}
 	}
 	return result
 }

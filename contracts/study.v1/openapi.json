@@ -67,7 +67,33 @@
       "sync_key_field": "sync_id",
       "normalized_hash_algorithm": "sha256",
       "key_scope": "authorized_principal_and_session_or_active_scope",
-      "changed_input_code": "IDEMPOTENCY_CONFLICT"
+      "changed_input_code": "IDEMPOTENCY_CONFLICT",
+      "identical_sync_replay": {
+        "preserved_response_members": [
+          "receipts",
+          "flush_receipt",
+          "session.page"
+        ],
+        "live_session_envelope_may_advance": true,
+        "whole_response_byte_stable": false
+      }
+    },
+    "sync_adjudication": {
+      "request_partition": [
+        "immutable_replay_prefix",
+        "one_new_contiguous_suffix"
+      ],
+      "successful_new_suffix_dispositions": [
+        "accepted",
+        "semantic_duplicate"
+      ],
+      "terminal_domain_failure": {
+        "applies_to": "every_new_suffix_sequence",
+        "receipt_disposition": "terminal_rejected",
+        "receipt_code_source": "first_failure_code",
+        "commits_canonical_events": false,
+        "allocates_profile_ingestion_ordinals": false
+      }
     },
     "stable_error_codes": [
       "STUDY_SCHEMA_INVALID",
@@ -247,7 +273,7 @@
       "post": {
         "operationId": "syncStudySession",
         "summary": "Atomically adjudicate a contiguous client-stream batch",
-        "description": "Accepted, semantic-duplicate, and stable terminally rejected sequences receive durable receipts. Retryable request failures adjudicate no new sequence.",
+        "description": "Reconcile an immutable receipt prefix already terminally adjudicated for this stream, then adjudicate at most one new contiguous suffix. A valid new suffix may mix accepted and semantic-duplicate receipts. If any new event has a terminal domain failure, every sequence in the new suffix receives terminal_rejected with the first failure code and no new suffix canonical event or profile ingestion ordinal is committed. The replay prefix remains unchanged. Retryable request failures adjudicate no new sequence. Replaying an identical sync_id preserves the original event receipts, flush receipt, and immutable issued page bytes; the live session envelope may reflect current authoritative lifecycle or state, so the whole response is not promised byte-stable.",
         "x-idempotency-key-field": "sync_id",
         "x-normalized-request-hash": "sha256",
         "parameters": [
@@ -270,7 +296,7 @@
         },
         "responses": {
           "200": {
-            "description": "Terminal receipts, flush barrier, and an immutable issued page",
+            "description": "Terminal receipts, flush barrier, and an immutable issued page; an identical sync-id replay preserves those artifacts but may return a newer authoritative live session envelope",
             "headers": {
               "X-Request-ID": {
                 "$ref": "#/components/headers/ResponseCorrelationId"
@@ -1175,6 +1201,7 @@
       "SyncRequest": {
         "type": "object",
         "additionalProperties": false,
+        "description": "One ordered stream window partitioned into an immutable replay prefix followed by at most one new contiguous suffix. Either partition may be empty; an identical sync-id replay has no new suffix.",
         "required": [
           "protocol_version",
           "schema_version",
@@ -1207,7 +1234,7 @@
             "items": {
               "$ref": "#/components/schemas/StudyEvent"
             },
-            "description": "Strictly ordered, contiguous client_sequence values for this durable stream."
+            "description": "Strictly ordered client_sequence values for this durable stream. Already adjudicated leading sequences form an immutable replay prefix whose event identities and normalized payload hashes must match their receipts. Remaining values form exactly one new suffix beginning at the next unadjudicated sequence and continuing without gaps."
           },
           "page": {
             "$ref": "#/components/schemas/PageRequest"
@@ -1406,6 +1433,7 @@
       "SyncResource": {
         "type": "object",
         "additionalProperties": true,
+        "description": "The immutable terminal receipts and flush receipt for the reconciled prefix plus new suffix, together with an immutable issued page and a live authoritative session envelope. Identical sync-id replay does not imply whole-response byte stability.",
         "required": [
           "protocol_version",
           "schema_version",
@@ -1452,13 +1480,16 @@
             "maxItems": 64,
             "items": {
               "$ref": "#/components/schemas/EventReceipt"
-            }
+            },
+            "description": "Original receipts for the immutable replay prefix followed by receipts for one new contiguous suffix. A successful new suffix may mix accepted and semantic_duplicate. A terminal domain failure makes every new-suffix receipt terminal_rejected with the first failure code and null canonical event and ingestion ordinal."
           },
           "flush_receipt": {
-            "$ref": "#/components/schemas/FlushReceipt"
+            "$ref": "#/components/schemas/FlushReceipt",
+            "description": "The original durable flush receipt is preserved on an identical sync-id replay."
           },
           "session": {
-            "$ref": "#/components/schemas/SessionResource"
+            "$ref": "#/components/schemas/SessionResource",
+            "description": "The issued page bytes remain immutable on identical sync-id replay, while the surrounding session envelope may reflect current authoritative lifecycle or state."
           },
           "generated_at": {
             "type": "string",

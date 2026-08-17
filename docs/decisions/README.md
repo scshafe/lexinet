@@ -6,3 +6,4 @@ contract choices independently of the house-panel repository's ADR numbering.
 | Decision | Status | Subject |
 |---|---|---|
 | [0001](0001-freeze-study-v1-contract.md) | Accepted | Freeze the `study.v1` cross-repository contract |
+| [0002](0002-clarify-study-v1-atomic-sync.md) | Accepted | Clarify `study.v1` atomic sync boundaries |

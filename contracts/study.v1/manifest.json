@@ -36,7 +36,41 @@
     {
       "path": "examples/sync-rated-and-voided.json",
       "schema": "SyncResource",
-      "expected": "valid"
+      "expected": "valid",
+      "sync_adjudication": {
+        "replay_prefix_through_sequence": 4,
+        "new_suffix_outcome": "terminal_rejected",
+        "first_failure_code": "STUDY_RATING_VOID_TARGET_INVALID",
+        "required_new_suffix_dispositions": [
+          "terminal_rejected"
+        ]
+      }
+    },
+    {
+      "path": "examples/sync-new-suffix-mixed-success.json",
+      "schema": "SyncResource",
+      "expected": "valid",
+      "sync_adjudication": {
+        "replay_prefix_through_sequence": 0,
+        "new_suffix_outcome": "committed",
+        "required_new_suffix_dispositions": [
+          "accepted",
+          "semantic_duplicate"
+        ]
+      }
+    },
+    {
+      "path": "examples/sync-replay-prefix-then-grouped-terminal-suffix.json",
+      "schema": "SyncResource",
+      "expected": "valid",
+      "sync_adjudication": {
+        "replay_prefix_through_sequence": 2,
+        "new_suffix_outcome": "terminal_rejected",
+        "first_failure_code": "STUDY_EVENT_TRANSITION_INVALID",
+        "required_new_suffix_dispositions": [
+          "terminal_rejected"
+        ]
+      }
     },
     {
       "path": "examples/error-cycle-not-exhausted.json",
