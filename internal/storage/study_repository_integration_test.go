@@ -128,6 +128,9 @@ func testStudyReceiptClaimPersistence(
 			streamID, firstSequence, lastSequence, profileHighWater, root.Session.StateVersion); err != nil {
 			return err
 		}
+		if err := insertStudySessionPageArtifact(ctx, tx, originID, studyTestSessionPageArtifact()); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `
 			UPDATE study_client_streams
 			SET adjudicated_through_client_sequence = $2

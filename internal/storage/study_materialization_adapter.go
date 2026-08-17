@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"lexinet/internal/model"
 	"lexinet/internal/study"
@@ -20,6 +21,23 @@ type StudyMaterializationAdapter struct {
 type StudyCycleMaterializationRequest struct {
 	Transaction     StudyScopeTransactionInput
 	Materialization study.CycleMaterializationInput
+}
+
+// StudyCommittedCycleReadInput names the exact immutable creation receipt that
+// must be observed with its session and items in one committed snapshot.
+type StudyCommittedCycleReadInput struct {
+	Principal         model.StudyPrincipalID
+	ProfileRef        string
+	SessionID         uuid.UUID
+	CreationRequestID uuid.UUID
+}
+
+// StudySessionCycleRead is a storage-neutral consistent snapshot for GET and
+// sync composition. It contains no transaction or pgx implementation detail.
+type StudySessionCycleRead struct {
+	Profile model.StudyLearnerProfile
+	Session model.StudySession
+	Items   []model.StudySessionItem
 }
 
 var _ study.CycleMaterializationStore = (*StudyMaterializationAdapter)(nil)
@@ -291,21 +309,89 @@ func validateStudyMaterializationScopeCloneBounds(scope model.StudyNormalizedSco
 // barrier before invoking the store-free shadow runner.
 func (repository *Repository) ReadCommittedStudyCycle(
 	ctx context.Context,
-	profileRef string,
-	sessionID uuid.UUID,
+	input StudyCommittedCycleReadInput,
 ) (*study.CommittedCycle, error) {
-	session, err := repository.GetStudySession(ctx, profileRef, sessionID)
+	if !input.Principal.Valid() || !validStudyStorageReference(input.ProfileRef) ||
+		input.SessionID == uuid.Nil || input.CreationRequestID == uuid.Nil {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "committed study cycle lookup is invalid", "study_committed_cycle_read", false, nil)
+	}
+	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, mapStudyStorageError("study_committed_cycle_read_begin", err)
+	}
+	defer tx.Rollback(ctx)
+
+	session, err := queryStudySession(ctx, tx, input.SessionID, uuid.Nil, input.ProfileRef, false)
 	if err != nil {
 		return nil, err
 	}
-	items, err := repository.ListStudySessionItems(ctx, profileRef, sessionID)
+	receipt, err := readStudyCreationReceipt(
+		ctx,
+		tx,
+		session.LearnerProfileID,
+		session.Scope,
+		input.Principal,
+		input.CreationRequestID,
+	)
 	if err != nil {
 		return nil, err
 	}
-	return &study.CommittedCycle{
+	if receipt == nil || receipt.CanonicalStudySessionID != input.SessionID {
+		return nil, newStudyStorageError(model.StudyErrorCodeInternal, "exact committed study creation receipt is unavailable", "study_committed_cycle_read", false, nil)
+	}
+	items, err := listStudySessionItems(ctx, tx, input.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	committed := &study.CommittedCycle{
 		Session: cloneStudySession(*session),
 		Items:   cloneStudySessionItems(items),
-	}, nil
+		Receipt: cloneStudyCreationReceipt(*receipt),
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapStudyStorageError("study_committed_cycle_read_commit", err)
+	}
+	return committed, nil
+}
+
+// ReadStudySessionCycle returns learner, session, and ordered issued items from
+// one repeatable-read snapshot so mutable live links cannot straddle commits.
+func (repository *Repository) ReadStudySessionCycle(
+	ctx context.Context,
+	sessionID uuid.UUID,
+) (*StudySessionCycleRead, error) {
+	if sessionID == uuid.Nil {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study session cycle lookup is invalid", "study_session_cycle_read", false, nil)
+	}
+	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, mapStudyStorageError("study_session_cycle_read_begin", err)
+	}
+	defer tx.Rollback(ctx)
+	session, err := queryStudySession(ctx, tx, sessionID, uuid.Nil, "", false)
+	if err != nil {
+		return nil, err
+	}
+	profile, err := scanStudyProfile(tx.QueryRow(ctx, `
+		SELECT learner_profile_id, learner_profile_ref, profile_ingestion_high_water, created_at, updated_at
+		FROM study_learner_profiles
+		WHERE learner_profile_id = $1`, session.LearnerProfileID))
+	if err != nil {
+		return nil, mapStudyStorageError("study_session_cycle_profile_read", err)
+	}
+	items, err := listStudySessionItems(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	result := &StudySessionCycleRead{
+		Profile: *profile,
+		Session: cloneStudySession(*session),
+		Items:   cloneStudySessionItems(items),
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapStudyStorageError("study_session_cycle_read_commit", err)
+	}
+	return result, nil
 }
 
 func cloneStudySchedulerProvenance(

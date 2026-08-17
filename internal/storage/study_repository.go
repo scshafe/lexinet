@@ -315,6 +315,94 @@ func (repository *Repository) GetStudyLearnerProfile(ctx context.Context, profil
 	return profile, nil
 }
 
+// GetStudyLearnerProfileBySessionID resolves the stable learner owner for an
+// opaque session identity without requiring a caller-supplied profile guess.
+func (repository *Repository) GetStudyLearnerProfileBySessionID(
+	ctx context.Context,
+	sessionID uuid.UUID,
+) (*model.StudyLearnerProfile, error) {
+	if sessionID == uuid.Nil {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study session lookup is invalid", "study_session_profile_read", false, nil)
+	}
+	profile, err := scanStudyProfile(repository.db.QueryRow(ctx, `
+		SELECT profile.learner_profile_id, profile.learner_profile_ref,
+		       profile.profile_ingestion_high_water, profile.created_at, profile.updated_at
+		FROM study_sessions session
+		JOIN study_learner_profiles profile
+		  ON profile.learner_profile_id = session.learner_profile_id
+		WHERE session.study_session_id = $1`, sessionID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, newStudyStorageError(model.StudyErrorCodeSessionNotFound, "study session was not found", "study_session_profile_read", false, nil)
+	}
+	if err != nil {
+		return nil, mapStudyStorageError("study_session_profile_read", err)
+	}
+	return profile, nil
+}
+
+// ResolveStudyScope converts caller references into stable topic identities
+// and canonical slugs. Duplicate identities reached through different aliases
+// are rejected rather than silently narrowing the requested scope.
+func (repository *Repository) ResolveStudyScope(
+	ctx context.Context,
+	topicRefs []string,
+	cardKind model.StudyCardKind,
+) (model.StudyNormalizedScope, error) {
+	if !cardKind.Valid() || len(topicRefs) < 1 || len(topicRefs) > model.StudyMaximumTopics {
+		return model.StudyNormalizedScope{}, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study scope is invalid", "study_scope_resolve", false, nil)
+	}
+	for _, ref := range topicRefs {
+		if !validStudyStorageReference(ref) {
+			return model.StudyNormalizedScope{}, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study scope topic reference is invalid", "study_scope_resolve", false, nil)
+		}
+	}
+
+	tx, err := repository.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return model.StudyNormalizedScope{}, mapStudyStorageError("study_scope_resolve_begin", err)
+	}
+	defer tx.Rollback(ctx)
+
+	resolvedIDs := make([]uuid.UUID, 0, len(topicRefs))
+	canonicalRefs := make([]string, 0, len(topicRefs))
+	seenIDs := make(map[uuid.UUID]struct{}, len(topicRefs))
+	for _, ref := range topicRefs {
+		topicID, resolveErr := resolveTopicID(ctx, tx, ref)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, ErrTopicNotFound) {
+				return model.StudyNormalizedScope{}, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study scope topic was not found unambiguously", "study_scope_resolve", false, nil)
+			}
+			return model.StudyNormalizedScope{}, mapStudyStorageError("study_scope_resolve", resolveErr)
+		}
+		if _, duplicate := seenIDs[topicID]; duplicate {
+			return model.StudyNormalizedScope{}, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study scope resolves the same topic more than once", "study_scope_resolve", false, nil)
+		}
+		topic, topicErr := getTopicByID(ctx, tx, topicID)
+		if topicErr != nil {
+			if errors.Is(topicErr, ErrTopicNotFound) {
+				return model.StudyNormalizedScope{}, newStudyStorageError(model.StudyErrorCodeStateStale, "study scope topic changed during resolution", "study_scope_resolve", true, nil)
+			}
+			return model.StudyNormalizedScope{}, mapStudyStorageError("study_scope_resolve", topicErr)
+		}
+		seenIDs[topicID] = struct{}{}
+		resolvedIDs = append(resolvedIDs, topicID)
+		canonicalRefs = append(canonicalRefs, topic.Slug)
+	}
+
+	normalized, err := model.NormalizeStudyScope(model.StudyScope{
+		TopicIDs:  resolvedIDs,
+		TopicRefs: canonicalRefs,
+		CardKind:  cardKind,
+	})
+	if err != nil {
+		return model.StudyNormalizedScope{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.StudyNormalizedScope{}, mapStudyStorageError("study_scope_resolve_commit", err)
+	}
+	return normalized, nil
+}
+
 func (repository *Repository) GetStudySession(ctx context.Context, profileRef string, sessionID uuid.UUID) (*model.StudySession, error) {
 	if !validStudyStorageReference(profileRef) || sessionID == uuid.Nil {
 		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study session lookup is invalid", "study_session_read", false, nil)
@@ -1435,6 +1523,9 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 	if len(ideaIDs) > study.StudyMaximumSchedulingCards {
 		return nil, newStudyStorageError(model.StudyErrorCodeRequestTooLarge, "study eligible corpus exceeds the materialization work bound", "study_eligible_sources_lock", false, nil)
 	}
+	if err := lockAndValidateStudyScopeTopics(ctx, store.tx, store.scope); err != nil {
+		return nil, err
+	}
 	store.eligibleSourcesCaptured = true
 	store.eligibleSources = make(map[uuid.UUID]StudyEligibleSource, len(ideaIDs))
 	if len(ideaIDs) == 0 {
@@ -1541,6 +1632,36 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 		return nil, mapStudyDigestStorageError("study_eligible_corpus_digest", err)
 	}
 	return sources, nil
+}
+
+func lockAndValidateStudyScopeTopics(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope model.StudyNormalizedScope,
+) error {
+	rows, err := tx.Query(ctx, `
+		SELECT topic.id
+		FROM topics topic
+		WHERE topic.id = ANY($1::uuid[])
+		ORDER BY topic.id
+		FOR KEY SHARE`, scope.Scope.TopicIDs)
+	if err != nil {
+		return mapStudyStorageError("study_scope_topics_lock", err)
+	}
+	lockedTopicIDs, collectErr := collectUUIDRows(rows)
+	rows.Close()
+	if collectErr != nil {
+		return mapStudyStorageError("study_scope_topics_lock", collectErr)
+	}
+	if len(lockedTopicIDs) != len(scope.Scope.TopicIDs) {
+		return newStudyStorageError(model.StudyErrorCodeStateStale, "study scope topic authority is unavailable", "study_scope_topics_lock", true, nil)
+	}
+	for index := range lockedTopicIDs {
+		if lockedTopicIDs[index] != scope.Scope.TopicIDs[index] {
+			return newStudyStorageError(model.StudyErrorCodeInternal, "study scope topic lock order is inconsistent", "study_scope_topics_lock", false, nil)
+		}
+	}
+	return nil
 }
 
 func cloneStudyEligibleSource(source StudyEligibleSource) StudyEligibleSource {

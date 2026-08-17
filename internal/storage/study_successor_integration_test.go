@@ -125,6 +125,7 @@ func testStudySuccessorProductionEventBarrier(
 	streamID := uuid.New()
 	eventID := uuid.New()
 	syncResult, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               principal,
 		ProfileRef:              profileRef,
 		SessionID:               root.Session.ID,
@@ -222,6 +223,7 @@ func testStudySuccessorProductionMultiItemExhaustion(
 	fixture := newStudySuccessorProductionFixture(t, ctx, repository, "multi-item", 2)
 	streamID := uuid.New()
 	first, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Root.Session.ID,
@@ -257,6 +259,7 @@ func testStudySuccessorProductionMultiItemExhaustion(
 	}
 
 	second, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Root.Session.ID,
@@ -304,6 +307,7 @@ func testStudySuccessorProductionTerminalCollateral(
 	streamID := uuid.New()
 	rating := model.StudyRatingGood
 	terminal, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Root.Session.ID,
@@ -370,6 +374,7 @@ func testStudySuccessorProductionCrossProfileStream(
 	other := newStudySuccessorProductionFixture(t, ctx, repository, "stream-other", 1)
 	streamID := uuid.New()
 	owned, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               owner.Principal,
 		ProfileRef:              owner.ProfileRef,
 		SessionID:               owner.Root.Session.ID,
@@ -386,6 +391,7 @@ func testStudySuccessorProductionCrossProfileStream(
 	}
 
 	denied, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               other.Principal,
 		ProfileRef:              other.ProfileRef,
 		SessionID:               other.Root.Session.ID,
@@ -1404,6 +1410,7 @@ func newStudySuccessorCorrectionFixture(
 	rating := model.StudyRatingGood
 	ratedID := uuid.New()
 	initial, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Root.Session.ID,
@@ -1436,6 +1443,7 @@ func newStudySuccessorCorrectionFixture(
 	)
 	correctionEvent.RatingEventID = &ratedID
 	correctionInput := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Root.Session.ID,
@@ -1899,6 +1907,9 @@ func insertStudySuccessorFlushFixture(
 		stateVersion,
 	); err != nil {
 		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.FLUSH_FIXTURE_FAILED", err))
+	}
+	if err := insertStudySessionPageArtifact(ctx, tx, flushID, studyTestSessionPageArtifact()); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.FLUSH_PAGE_FIXTURE_FAILED", err))
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.FLUSH_FIXTURE_COMMIT_FAILED", err))

@@ -43,12 +43,24 @@ configured `variety_first_v1` plan independently before persistence. Durable
 creation receipts are resolved before mutable corpus, projection, redirect,
 or scheduler reads; replay returns the issued plan without inventing a
 historical scheduling snapshot. Empty locked corpora skip prefix rebuild and
-scheduling and persist or converge a `waiting_for_corpus` sentinel. Card,
-accepted-prefix, digest, and shadow payload bounds fail with structured errors
-before unbounded work.
+scheduling and persist or converge a `waiting_for_corpus` sentinel.
+`StudyItemIDAllocator` is the `@extension-point study_item_id_allocator`; it is
+invoked only after receipt preflight and validated locked capture prove the
+exact nonzero count, before projection replacement or cycle persistence.
+Replay and empty corpora never allocate.
+Allocator panic/error text and identities are private, while missing, zero,
+duplicate, wrong-count, and over-bound returns fail structurally before
+persistence. Card, accepted-prefix, digest, and shadow payload bounds fail with
+structured errors before unbounded work.
 
 The storage package's `Repository.MaterializeStudyCycle` is the production
 transaction wrapper. It exposes no staged result until commit succeeds.
+`CycleMaterializer.ValidateCommittedCycleAuthority` is the study-owned
+post-commit visibility barrier: storage supplies one consistent
+session/item/exact-creation-receipt snapshot, and the validator proves every
+frozen byte equals the materialized authority. Only lifecycle/high-water
+fields and the documented live source link may advance between commit and the
+fresh read; the returned authority is deeply detached from both inputs.
 `StudyShadowRunner` is a post-commit-only, non-authoritative evaluation seam:
 it receives private snapshot/plan copies and has no store, callback, or plan
 write capability. Callers may invoke it only for a newly created result whose

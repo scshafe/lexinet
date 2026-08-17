@@ -13,8 +13,8 @@ import (
 )
 
 // StudyEventSyncInput is the storage-authoritative portion of one normalized
-// study.v1 sync request. Page selection remains an API concern; this operation
-// owns only terminal event adjudication and the immutable flush barrier.
+// study.v1 sync request. The composition layer supplies exact typed page
+// bytes; this operation binds them atomically to the immutable flush barrier.
 type StudyEventSyncInput struct {
 	Principal               model.StudyPrincipalID
 	ProfileRef              string
@@ -24,6 +24,7 @@ type StudyEventSyncInput struct {
 	ClientStreamID          uuid.UUID
 	ExpectedStateVersion    int64
 	Events                  []model.StudyEvent
+	PageArtifact            model.StudySessionPageArtifact
 }
 
 // StudyEventSyncResult contains immutable receipt authority plus the live
@@ -33,6 +34,7 @@ type StudyEventSyncResult struct {
 	Receipts     []model.StudyEventReceipt
 	FlushReceipt model.StudyFlushReceipt
 	Session      model.StudySession
+	PageArtifact model.StudySessionPageArtifact
 	Replayed     bool
 }
 
@@ -45,6 +47,7 @@ type normalizedStudyEventSyncInput struct {
 	ClientStreamID          uuid.UUID
 	ExpectedStateVersion    int64
 	Events                  []normalizedStudySyncEvent
+	PageArtifact            model.StudySessionPageArtifact
 }
 
 type normalizedStudySyncEvent struct {
@@ -112,6 +115,10 @@ func (repository *Repository) AdjudicateStudyEvents(
 	if err != nil {
 		return nil, err
 	}
+	stream, err := lockStudyClientStream(ctx, tx, profile.ID, normalized.ClientStreamID, true)
+	if err != nil {
+		return nil, err
+	}
 
 	existingFlush, err := readStudyFlushReceipt(
 		ctx,
@@ -133,6 +140,10 @@ func (repository *Repository) AdjudicateStudyEvents(
 		}
 		return result, nil
 	}
+	if err := model.ValidateStudySessionPageArtifact(normalized.PageArtifact); err != nil {
+		return nil, err
+	}
+	normalized.PageArtifact = cloneStudySessionPageArtifact(normalized.PageArtifact)
 
 	if session.StateVersion != normalized.ExpectedStateVersion {
 		return nil, newStudyStorageError(
@@ -144,10 +155,6 @@ func (repository *Repository) AdjudicateStudyEvents(
 		)
 	}
 
-	stream, err := lockStudyClientStream(ctx, tx, profile.ID, normalized.ClientStreamID, true)
-	if err != nil {
-		return nil, err
-	}
 	replayPrefix, newSuffix, err := reconcileStudyEventWindow(
 		ctx,
 		tx,
@@ -196,7 +203,6 @@ func normalizeStudyEventSyncInput(input StudyEventSyncInput) (normalizedStudyEve
 			nil,
 		)
 	}
-
 	normalized := normalizedStudyEventSyncInput{
 		Principal:               input.Principal,
 		ProfileRef:              input.ProfileRef,
@@ -206,6 +212,7 @@ func normalizeStudyEventSyncInput(input StudyEventSyncInput) (normalizedStudyEve
 		ClientStreamID:          input.ClientStreamID,
 		ExpectedStateVersion:    input.ExpectedStateVersion,
 		Events:                  make([]normalizedStudySyncEvent, len(input.Events)),
+		PageArtifact:            input.PageArtifact,
 	}
 	for index := range input.Events {
 		event := cloneStudySyncEvent(input.Events[index])
@@ -241,6 +248,12 @@ func normalizeStudyEventSyncInput(input StudyEventSyncInput) (normalizedStudyEve
 		}
 	}
 	return normalized, nil
+}
+
+func cloneStudySessionPageArtifact(source model.StudySessionPageArtifact) model.StudySessionPageArtifact {
+	clone := source
+	clone.CanonicalJSON = append([]byte(nil), source.CanonicalJSON...)
+	return clone
 }
 
 func cloneStudySyncEvent(source model.StudyEvent) model.StudyEvent {
@@ -350,8 +363,14 @@ func replayStudyEventSync(
 			nil,
 		)
 	}
-	if _, err := lockStudyClientStream(ctx, tx, session.LearnerProfileID, input.ClientStreamID, false); err != nil {
-		return nil, err
+	if !flush.SessionPageArtifactRequired {
+		return nil, newStudyStorageError(
+			model.StudyErrorCodeInternal,
+			"legacy study sync receipt has no exact page replay authority",
+			"study_event_sync_replay",
+			false,
+			nil,
+		)
 	}
 	receipts, err := readAndMatchStudyEventReceipts(
 		ctx,
@@ -364,6 +383,10 @@ func replayStudyEventSync(
 	if err != nil {
 		return nil, err
 	}
+	pageArtifact, err := readStudySessionPageArtifact(ctx, tx, flush.ID)
+	if err != nil {
+		return nil, err
+	}
 	refreshed, err := queryStudySession(ctx, tx, session.ID, session.LearnerProfileID, "", false)
 	if err != nil {
 		return nil, err
@@ -372,6 +395,7 @@ func replayStudyEventSync(
 		Receipts:     receipts,
 		FlushReceipt: flush,
 		Session:      *refreshed,
+		PageArtifact: *pageArtifact,
 		Replayed:     true,
 	}, nil
 }
@@ -455,7 +479,12 @@ func adjudicateStudyEventSuffix(
 		if err != nil {
 			return nil, err
 		}
-		return &StudyEventSyncResult{Receipts: replayPrefix, FlushReceipt: *flush, Session: *refreshed}, nil
+		return &StudyEventSyncResult{
+			Receipts:     replayPrefix,
+			FlushReceipt: *flush,
+			Session:      *refreshed,
+			PageArtifact: cloneStudySessionPageArtifact(input.PageArtifact),
+		}, nil
 	}
 
 	for index := range suffix {
@@ -566,7 +595,12 @@ func adjudicateStudyEventSuffix(
 		return nil, err
 	}
 	receipts := append(append(make([]model.StudyEventReceipt, 0, len(replayPrefix)+len(newReceipts)), replayPrefix...), newReceipts...)
-	return &StudyEventSyncResult{Receipts: receipts, FlushReceipt: *flush, Session: *refreshed}, nil
+	return &StudyEventSyncResult{
+		Receipts:     receipts,
+		FlushReceipt: *flush,
+		Session:      *refreshed,
+		PageArtifact: cloneStudySessionPageArtifact(input.PageArtifact),
+	}, nil
 }
 
 func bindStudySuffixEventIDs(
@@ -1004,6 +1038,7 @@ func insertStudyFlushReceipt(
 		AcknowledgedThroughSequence: stream.AdjudicatedThroughSequence,
 		ProfileIngestionHighWater:   profile.ProfileIngestionHighWater,
 		StudySessionStateVersion:    session.StateVersion,
+		SessionPageArtifactRequired: true,
 	}
 	receipt.RequestFirstClientSequence, receipt.RequestLastClientSequence = studySyncRequestSequenceRange(input.Events)
 	if err := tx.QueryRow(ctx, `
@@ -1021,8 +1056,9 @@ func insertStudyFlushReceipt(
 			last_client_sequence,
 			acknowledged_through_client_sequence,
 			profile_ingestion_high_water,
-			study_session_state_version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			study_session_state_version,
+			session_page_artifact_required
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		RETURNING study_flush_receipt_issued_at`,
 		receipt.ID,
 		receipt.StudyPrincipalID.String(),
@@ -1038,10 +1074,77 @@ func insertStudyFlushReceipt(
 		receipt.AcknowledgedThroughSequence,
 		receipt.ProfileIngestionHighWater,
 		receipt.StudySessionStateVersion,
+		receipt.SessionPageArtifactRequired,
 	).Scan(&receipt.IssuedAt); err != nil {
 		return nil, mapStudyStorageError("study_flush_receipt_insert", err)
 	}
+	if err := insertStudySessionPageArtifact(ctx, tx, receipt.ID, input.PageArtifact); err != nil {
+		return nil, err
+	}
 	return &receipt, nil
+}
+
+func insertStudySessionPageArtifact(
+	ctx context.Context,
+	tx pgx.Tx,
+	flushReceiptID uuid.UUID,
+	artifact model.StudySessionPageArtifact,
+) error {
+	if flushReceiptID == uuid.Nil {
+		return newStudyStorageError(model.StudyErrorCodeInternal, "study page artifact has no flush receipt authority", "study_session_page_insert", false, nil)
+	}
+	if err := model.ValidateStudySessionPageArtifact(artifact); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO study_flush_receipt_session_pages (
+			study_flush_receipt_id,
+			page_after_position,
+			page_limit,
+			canonical_session_page,
+			canonical_session_page_sha256
+		) VALUES ($1, $2, $3, $4, $5)`,
+		flushReceiptID,
+		artifact.Request.AfterPosition,
+		artifact.Request.Limit,
+		string(artifact.CanonicalJSON),
+		artifact.CanonicalSHA256,
+	); err != nil {
+		return mapStudyStorageError("study_session_page_insert", err)
+	}
+	return nil
+}
+
+func readStudySessionPageArtifact(
+	ctx context.Context,
+	tx pgx.Tx,
+	flushReceiptID uuid.UUID,
+) (*model.StudySessionPageArtifact, error) {
+	var artifact model.StudySessionPageArtifact
+	var canonicalJSON string
+	err := tx.QueryRow(ctx, `
+		SELECT page_after_position, page_limit, canonical_session_page,
+		       canonical_session_page_sha256
+		FROM study_flush_receipt_session_pages
+		WHERE study_flush_receipt_id = $1
+		FOR UPDATE`, flushReceiptID).Scan(
+		&artifact.Request.AfterPosition,
+		&artifact.Request.Limit,
+		&canonicalJSON,
+		&artifact.CanonicalSHA256,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, newStudyStorageError(model.StudyErrorCodeInternal, "study sync replay page evidence is unavailable", "study_session_page_read", false, nil)
+	}
+	if err != nil {
+		return nil, mapStudyStorageError("study_session_page_read", err)
+	}
+	artifact.CanonicalJSON = []byte(canonicalJSON)
+	if err := model.ValidateStudySessionPageArtifact(artifact); err != nil {
+		return nil, newStudyStorageError(model.StudyErrorCodeInternal, "stored study sync replay page evidence is invalid", "study_session_page_read", false, err)
+	}
+	clone := cloneStudySessionPageArtifact(artifact)
+	return &clone, nil
 }
 
 func cloneStudyInt64Pointer(value *int64) *int64 {
@@ -1179,11 +1282,13 @@ func readStudyFlushReceipt(
 			acknowledged_through_client_sequence,
 			profile_ingestion_high_water,
 			study_session_state_version,
+			session_page_artifact_required,
 			study_flush_receipt_issued_at
-		FROM study_flush_receipts
-		WHERE study_principal_id = $1
-		  AND study_session_id = $2
-		  AND sync_request_id = $3`, principal.String(), sessionID, syncRequestID).Scan(
+			FROM study_flush_receipts
+			WHERE study_principal_id = $1
+			  AND study_session_id = $2
+			  AND sync_request_id = $3
+			FOR UPDATE`, principal.String(), sessionID, syncRequestID).Scan(
 		&receipt.ID,
 		&storedPrincipal,
 		&receipt.LearnerProfileID,
@@ -1198,6 +1303,7 @@ func readStudyFlushReceipt(
 		&receipt.AcknowledgedThroughSequence,
 		&receipt.ProfileIngestionHighWater,
 		&receipt.StudySessionStateVersion,
+		&receipt.SessionPageArtifactRequired,
 		&receipt.IssuedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

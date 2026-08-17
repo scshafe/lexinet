@@ -52,6 +52,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 		newStudyEventTestEvent(fixture, item, streamID, 4, voidedID, model.StudyEventKindRatingVoided, nil, &ratedID),
 	}
 	initialInput := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -112,6 +113,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 	}, model.StudyErrorCodeIdempotencyConflict, "CHANGED_REUSED_SYNC_HASH")
 
 	duplicateInput := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -146,6 +148,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 		newStudyEventTestEvent(fixture, item, streamID, 10, uuid.New(), model.StudyEventKindRatingVoided, nil, nil),
 	}
 	terminalInput := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -184,6 +187,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 		newStudyEventTestEvent(fixture, item, streamID, 11, voidedAfterFailureID, model.StudyEventKindRatingVoided, nil, &mixedRatedID),
 	}
 	continued, err := restartedRepository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -208,6 +212,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 	movedUUID := initialEvents[0]
 	movedUUID.ClientSequence = 12
 	idConflict, err := restartedRepository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -231,6 +236,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 	reprovisionedEvent := initialEvents[0]
 	reprovisionedEvent.ClientStreamID = reprovisionedStreamID
 	reprovisioned, err := restartedRepository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -246,6 +252,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 	assertStudyEventSemanticDuplicate(t, reprovisioned.Receipts[0], presentedID, 1, "STUDY_EVENT.ITEM2.REPROVISION_INVALID")
 
 	staleInput := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -282,6 +289,7 @@ func TestPlanLexinetStep2Verify1Item2MigrateUpExerciseStreamRestartReprovisionSe
 	)
 	contentMismatchEvent.ContentSHA256 = studyEventTestHash("unissued-content")
 	contentMismatch, err := restartedRepository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -374,6 +382,7 @@ func TestPlanLexinetStep2Verify1Item3ConcurrentlyIngestFromTwoClientInstancesAnd
 	runSync := func(targetRepository *Repository, fixture studyEventTestFixture) outcome {
 		streamID := uuid.New()
 		result, err := targetRepository.AdjudicateStudyEvents(workerContext, StudyEventSyncInput{
+			PageArtifact:            studyTestSessionPageArtifact(),
 			Principal:               fixture.Principal,
 			ProfileRef:              fixture.ProfileRef,
 			SessionID:               fixture.Plan.Session.ID,
@@ -630,6 +639,7 @@ func testStudyEventTerminalUUIDsFreshlyReadjudicate(t *testing.T, ctx context.Co
 		newStudyEventTestEvent(fixture, item, failedStreamID, 2, ratedID, model.StudyEventKindRated, &rating, nil),
 	}
 	failed, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -655,6 +665,7 @@ func testStudyEventTerminalUUIDsFreshlyReadjudicate(t *testing.T, ctx context.Co
 	presented := failedEvents[0]
 	presented.ClientStreamID = presentedStreamID
 	presentedResult, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -674,6 +685,7 @@ func testStudyEventTerminalUUIDsFreshlyReadjudicate(t *testing.T, ctx context.Co
 	rated := failedEvents[1]
 	rated.ClientStreamID = ratingStreamID
 	ratedResult, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -708,6 +720,7 @@ func testStudyEventIDConflictCollateralFreshlyReadjudicates(
 		newStudyEventTestEvent(fixture, item, failedStreamID, 3, uuid.New(), model.StudyEventKindRevealed, nil, nil),
 	}
 	failed, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -737,6 +750,7 @@ func testStudyEventIDConflictCollateralFreshlyReadjudicates(
 	readjudicated := failedEvents[0]
 	readjudicated.ClientStreamID = reprovisionedStreamID
 	result, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -809,6 +823,7 @@ func testStudyEventCompletedCorrections(
 		newStudyEventTestEvent(fixture, fixture.Plan.Items[0], streamID, 15, uuid.New(), model.StudyEventKindRatingVoided, nil, &ratedID),
 	}
 	correction, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               predecessorID,
@@ -841,6 +856,7 @@ func testStudyEventCompletedCorrections(
 		nil,
 	)
 	rejected, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               predecessorID,
@@ -896,6 +912,7 @@ func testStudyEventDeferredCommitFailureRollsBack(
 	streamID := uuid.New()
 	syncID := uuid.New()
 	input := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,
@@ -1037,6 +1054,7 @@ func testStudyEventGlobalUUIDRace(
 	runSync := func(target *Repository, fixture studyEventTestFixture, eventIDs [2]uuid.UUID) outcome {
 		streamID := uuid.New()
 		result, err := target.AdjudicateStudyEvents(workerContext, StudyEventSyncInput{
+			PageArtifact:            studyTestSessionPageArtifact(),
 			Principal:               fixture.Principal,
 			ProfileRef:              fixture.ProfileRef,
 			SessionID:               fixture.Plan.Session.ID,
@@ -1145,6 +1163,7 @@ func testStudyEventCrossSessionReplayRejected(
 	}
 	streamID := priorEvent.ClientStreamID
 	input := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               second.Principal,
 		ProfileRef:              second.ProfileRef,
 		SessionID:               second.Plan.Session.ID,
@@ -1171,6 +1190,7 @@ func testStudyEventEmptyFlushReplay(
 	t.Helper()
 	streamID := uuid.New()
 	input := StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               fixture.Principal,
 		ProfileRef:              fixture.ProfileRef,
 		SessionID:               fixture.Plan.Session.ID,

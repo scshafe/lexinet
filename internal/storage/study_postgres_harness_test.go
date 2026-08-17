@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"lexinet/internal/model"
 	"lexinet/migrations"
 )
 
@@ -242,6 +243,23 @@ func studyTestDatabaseError(code string, err error) error {
 	return fmt.Errorf("%s: cause_type=%T", code, err)
 }
 
+func studyTestSessionPageArtifact() model.StudySessionPageArtifact {
+	canonicalJSON, err := model.EncodeStudySessionPageDocument(model.StudySessionPageDocument{
+		AfterPosition: -1, NextAfterPosition: -1, Complete: true, Items: []model.StudySessionPageCardProjection{},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return model.StudySessionPageArtifact{
+		Request: model.StudySessionPageRequest{
+			AfterPosition: -1,
+			Limit:         model.StudyMaximumPageItems,
+		},
+		CanonicalJSON:   canonicalJSON,
+		CanonicalSHA256: model.SHA256Hex(canonicalJSON),
+	}
+}
+
 func studyTestMigrationOriginalError(err error) (uint, error, bool) {
 	var pointerError *migratedatabase.Error
 	if errors.As(err, &pointerError) && pointerError != nil {
@@ -354,7 +372,9 @@ func (harness *studyTestPostgres) migrateStudyDown(t *testing.T) {
 	}
 	migrator := harness.newMigrator(t)
 	defer closeStudyTestMigrator(t, migrator)
-	if err := migrator.Steps(-1); err != nil {
+	// Version 6 is the explicit pre-study target. This preserves the original
+	// 0007 teardown proof now that 0008 adds a second study migration.
+	if err := migrator.Migrate(6); err != nil {
 		t.Fatal(studyTestDatabaseError("STUDY_TEST_POSTGRES.MIGRATE_STUDY_DOWN_FAILED", err))
 	}
 }
@@ -523,8 +543,8 @@ func boundedTestOutput(output []byte) string {
 
 // studySchemaContract returns timestamp-free canonical catalog evidence for
 // every study-owned column, constraint, index, trigger, and function. Comparing
-// the bytes before and after 0007 down/up proves the same schema contract, not
-// merely that both migration commands returned success.
+// the bytes before and after an explicit study migration down/up proves the
+// same schema contract, not merely that both migration commands returned success.
 func studySchemaContract(ctx context.Context, pool *pgxpool.Pool) ([]byte, string, error) {
 	if pool == nil {
 		return nil, "", errors.New("pool is required")

@@ -80,6 +80,7 @@ func testStudyMaterializerOldestSentinelOrdering(
 	}
 	streamID := uuid.New()
 	flushed, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               model.OperatorStudyPrincipalID(),
 		ProfileRef:              profileRef,
 		SessionID:               root.Persistence.Session.ID,
@@ -138,7 +139,13 @@ func TestPlanLexinetStep3Verify1Item3ShadowOutputCannotChangeAnyProductionPlan(t
 	}
 	// This fresh repository query is the explicit committed-visibility barrier;
 	// no shadow adapter is invoked before it succeeds.
-	committed, err := repository.ReadCommittedStudyCycle(ctx, profileRef, created.Persistence.Session.ID)
+	committedRead := StudyCommittedCycleReadInput{
+		Principal:         request.Materialization.Principal,
+		ProfileRef:        profileRef,
+		SessionID:         created.Persistence.Session.ID,
+		CreationRequestID: request.Materialization.CreationRequestID,
+	}
+	committed, err := repository.ReadCommittedStudyCycle(ctx, committedRead)
 	if err != nil || committed == nil || !reflect.DeepEqual(committed.Session, created.Persistence.Session) ||
 		!reflect.DeepEqual(committed.Items, created.Persistence.Items) {
 		t.Fatal(studyTestDatabaseError("STUDY_MATERIALIZER.SHADOW.COMMITTED_VISIBILITY_FAILED", err))
@@ -215,7 +222,7 @@ func TestPlanLexinetStep3Verify1Item3ShadowOutputCannotChangeAnyProductionPlan(t
 			if report.Status != testCase.wantStatus || report.Authority != study.StudyShadowAuthorityNonAuthoritative {
 				t.Fatalf("shadow report = %#v", report)
 			}
-			after, readErr := repository.ReadCommittedStudyCycle(ctx, profileRef, created.Persistence.Session.ID)
+			after, readErr := repository.ReadCommittedStudyCycle(ctx, committedRead)
 			if readErr != nil || !reflect.DeepEqual(after.Session, baseline.Session) || !reflect.DeepEqual(after.Items, baseline.Items) ||
 				!reflect.DeepEqual(authoritativePlan, *created.AuthoritativePlan) || !reflect.DeepEqual(snapshot, *created.SchedulingSnapshot) {
 				t.Fatal("STUDY_MATERIALIZER.SHADOW.CHANGED_PRODUCTION_AUTHORITY")
@@ -577,6 +584,7 @@ func testStudyMaterializerProjectionCorrection(
 		sequence += 3
 	}
 	initial, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               model.OperatorStudyPrincipalID(),
 		ProfileRef:              profileRef,
 		SessionID:               root.Persistence.Session.ID,
@@ -591,6 +599,7 @@ func testStudyMaterializerProjectionCorrection(
 	}
 	voidedRatingID := ratingIDs[1]
 	correction, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               model.OperatorStudyPrincipalID(),
 		ProfileRef:              profileRef,
 		SessionID:               root.Persistence.Session.ID,
@@ -857,6 +866,7 @@ func testStudyMaterializerBoundaryAndMergeReplay(
 		newStudyMaterializationEvent(profileRef, otherItem, streamID, 2, uuid.New(), model.StudyEventKindPresented, nil, nil),
 	}
 	flush, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		PageArtifact:            studyTestSessionPageArtifact(),
 		Principal:               model.OperatorStudyPrincipalID(),
 		ProfileRef:              profileRef,
 		SessionID:               root.Persistence.Session.ID,
@@ -1218,7 +1228,14 @@ func newStudyMaterializerIntegrationSubject(t *testing.T) *study.CycleMaterializ
 	if err != nil {
 		t.Fatalf("construct production scheduler: %v", err)
 	}
-	materializer, err := study.NewCanonicalCycleMaterializer(scheduler)
+	allocator := study.StudyItemIDAllocatorFunc(func(_ context.Context, requestedCount int) ([]uuid.UUID, error) {
+		identities := make([]uuid.UUID, requestedCount)
+		for index := range identities {
+			identities[index] = uuid.New()
+		}
+		return identities, nil
+	})
+	materializer, err := study.NewCanonicalCycleMaterializer(scheduler, allocator)
 	if err != nil {
 		t.Fatalf("construct production materializer: %v", err)
 	}
@@ -1228,20 +1245,15 @@ func newStudyMaterializerIntegrationSubject(t *testing.T) *study.CycleMaterializ
 func newStudyMaterializationRequest(
 	profileRef string,
 	scope model.StudyNormalizedScope,
-	itemCount int,
+	_ int,
 	label string,
 	predecessorID *uuid.UUID,
 	flushReceiptID uuid.UUID,
 ) StudyCycleMaterializationRequest {
-	itemIDs := make([]uuid.UUID, itemCount)
-	for index := range itemIDs {
-		itemIDs[index] = uuid.New()
-	}
 	return StudyCycleMaterializationRequest{
 		Transaction: StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
 		Materialization: study.CycleMaterializationInput{
 			SessionID:                     uuid.New(),
-			ItemIDs:                       itemIDs,
 			Principal:                     model.OperatorStudyPrincipalID(),
 			CreationRequestID:             uuid.New(),
 			NormalizedRequestSHA256:       studyMaterializationHash("request-" + label),

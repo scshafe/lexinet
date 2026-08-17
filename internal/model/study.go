@@ -1,10 +1,13 @@
 package model
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,13 +15,18 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	studydigest "lexinet/internal/study/digest"
 )
 
 const (
-	StudyProtocolVersion = "study.v1"
-	StudySchemaVersion   = 1
-	StudyMaximumTopics   = 32
-	StudyMaximumEvents   = 64
+	StudyProtocolVersion         = "study.v1"
+	StudySchemaVersion           = 1
+	StudyMaximumTopics           = 32
+	StudyMaximumEvents           = 64
+	StudyMaximumPageItems        = 64
+	StudyMaximumPagePosition     = 2147483647
+	StudyMaximumSessionPageBytes = 983040
 )
 
 var (
@@ -586,7 +594,76 @@ type StudyFlushReceipt struct {
 	AcknowledgedThroughSequence int64            `json:"acknowledged_through_sequence"`
 	ProfileIngestionHighWater   int64            `json:"profile_ingestion_high_water"`
 	StudySessionStateVersion    int64            `json:"state_version"`
+	SessionPageArtifactRequired bool             `json:"-"`
 	IssuedAt                    time.Time        `json:"issued_at"`
+}
+
+// StudySessionPageRequest is the bounded immutable page selector bound to one
+// sync receipt. Position -1 means before the first issued item.
+type StudySessionPageRequest struct {
+	AfterPosition int `json:"after_position"`
+	Limit         int `json:"limit"`
+}
+
+// StudySessionPageArtifact preserves the exact deterministic typed SessionPage
+// bytes issued with a sync. Storage authenticates and returns these bytes
+// verbatim on replay; it never reconstructs historical output from mutable
+// live links.
+type StudySessionPageArtifact struct {
+	Request         StudySessionPageRequest `json:"request"`
+	CanonicalJSON   json.RawMessage         `json:"canonical_json"`
+	CanonicalSHA256 string                  `json:"canonical_sha256"`
+}
+
+// StudySessionPageDocument is the single deterministic typed JSON shape used
+// for persisted page artifacts and for the page nested in study responses.
+// Field declaration order is wire-significant because encoding/json preserves
+// it, and full int64 values must never cross an IEEE-754 canonicalizer.
+type StudySessionPageDocument struct {
+	AfterPosition     int                              `json:"after_position"`
+	NextAfterPosition int                              `json:"next_after_position"`
+	Complete          bool                             `json:"complete"`
+	Items             []StudySessionPageCardProjection `json:"items"`
+}
+
+type StudySessionPageCardProjection struct {
+	SessionItemID    uuid.UUID                       `json:"session_item_id"`
+	Position         int                             `json:"position"`
+	CardKind         StudyCardKind                   `json:"card_kind"`
+	CardIdentity     uuid.UUID                       `json:"card_identity"`
+	LiveSourceIdeaID *uuid.UUID                      `json:"live_source_idea_id"`
+	SourceRevision   StudySessionPageSourceRevision  `json:"source_revision"`
+	Front            StudySessionPageCardFront       `json:"front"`
+	Back             StudySessionPageCardBack        `json:"back"`
+	SelectionReason  StudySessionPageSelectionReason `json:"selection_reason"`
+}
+
+type StudySessionPageSourceRevision struct {
+	SourceKind      string    `json:"source_kind"`
+	SourceIdentity  uuid.UUID `json:"source_identity"`
+	ContentRevision string    `json:"content_revision"`
+	ContentSHA256   string    `json:"content_sha256"`
+}
+
+type StudySessionPageCardFront struct {
+	CanonicalName string `json:"canonical_name"`
+}
+
+type StudySessionPageCardBack struct {
+	Definition string  `json:"definition"`
+	Example    *string `json:"example"`
+}
+
+type StudySessionPageSelectionReason struct {
+	RatingRank                      StudyRatingRank         `json:"rating_rank"`
+	LatestPresentedIngestionOrdinal *int64                  `json:"latest_presented_ingestion_ordinal"`
+	TieBreakerSHA256                string                  `json:"tie_breaker_sha256"`
+	BoundaryAdjustment              StudyBoundaryAdjustment `json:"boundary_adjustment"`
+}
+
+// EncodeStudySessionPageDocument is the only persisted/nested page encoder.
+func EncodeStudySessionPageDocument(page StudySessionPageDocument) ([]byte, error) {
+	return json.Marshal(page)
 }
 
 // StudySchedulerCardProjection is deterministic derived state. UpdatedAt is
@@ -789,8 +866,15 @@ func NormalizeStudyEventPayload(event StudyEvent) (json.RawMessage, string, erro
 
 // ValidateStudySessionItem enforces every persisted study.v1 projection bound.
 func ValidateStudySessionItem(item StudySessionItem) error {
-	if item.ID == uuid.Nil || item.StudySessionID == uuid.Nil || item.CardIdentity == uuid.Nil || item.HistoricalSourceIdentity == uuid.Nil {
+	if item.ID == uuid.Nil || item.StudySessionID == uuid.Nil {
 		return newStudySchemaError("study session item identities are required", "session_item_id")
+	}
+	return validateStudySessionItemProjection(item)
+}
+
+func validateStudySessionItemProjection(item StudySessionItem) error {
+	if item.CardIdentity == uuid.Nil || item.HistoricalSourceIdentity == uuid.Nil {
+		return newStudySchemaError("study session item identities are required", "card_identity")
 	}
 	if item.Position < 0 {
 		return newStudySchemaError("study session item position must be nonnegative", "position")
@@ -819,12 +903,333 @@ func ValidateStudySessionItem(item StudySessionItem) error {
 	return nil
 }
 
+// ValidateStudySessionPageArtifact authenticates exact deterministic typed
+// SessionPage evidence before storage persists or replays it. Binding the page
+// to the authoritative session items remains the composition layer's job.
+func ValidateStudySessionPageArtifact(artifact StudySessionPageArtifact) error {
+	if artifact.Request.AfterPosition < -1 || artifact.Request.AfterPosition > StudyMaximumPagePosition {
+		return newStudySchemaError("study page after_position is outside the frozen bound", "page.after_position")
+	}
+	if artifact.Request.Limit < 1 || artifact.Request.Limit > StudyMaximumPageItems {
+		return newStudySchemaError("study page limit is outside the frozen bound", "page.limit")
+	}
+	if len(artifact.CanonicalJSON) < 1 || len(artifact.CanonicalJSON) > StudyMaximumSessionPageBytes || !utf8.Valid(artifact.CanonicalJSON) {
+		return newStudySchemaError("study session page JSON is outside the frozen byte bound", "page.canonical_json")
+	}
+	if !IsStudySHA256(artifact.CanonicalSHA256) || SHA256Hex(artifact.CanonicalJSON) != artifact.CanonicalSHA256 {
+		return newStudySchemaError("study exact session page digest is invalid", "page.canonical_sha256")
+	}
+	page, err := DecodeExactStudySessionPageDocument(artifact.CanonicalJSON)
+	if err != nil {
+		return newStudySchemaError("study session page does not match its exact typed wire schema", "page.canonical_json")
+	}
+	if page.AfterPosition != artifact.Request.AfterPosition {
+		return newStudySchemaError("study exact session page request does not match its artifact", "page.after_position")
+	}
+	if len(page.Items) > artifact.Request.Limit {
+		return newStudySchemaError("study exact session page items exceed the requested bound", "page.items")
+	}
+	return nil
+}
+
+// DecodeExactStudySessionPageDocument accepts only the byte-for-byte output of
+// EncodeStudySessionPageDocument for a valid bounded page. This rejects
+// unknown, missing, duplicate, reordered, or alternative-escaped JSON while
+// preserving the full signed-integer domain supported by the wire contract.
+func DecodeExactStudySessionPageDocument(encoded []byte) (StudySessionPageDocument, error) {
+	if len(encoded) < 1 || len(encoded) > StudyMaximumSessionPageBytes || !utf8.Valid(encoded) {
+		return StudySessionPageDocument{}, errors.New("study session page bytes are invalid")
+	}
+	strict, err := decodeStrictStudySessionPage(encoded)
+	if err != nil {
+		return StudySessionPageDocument{}, err
+	}
+	page := StudySessionPageDocument{
+		AfterPosition:     *strict.AfterPosition,
+		NextAfterPosition: *strict.NextAfterPosition,
+		Complete:          *strict.Complete,
+		Items:             make([]StudySessionPageCardProjection, len(*strict.Items)),
+	}
+	if page.AfterPosition < -1 || page.AfterPosition > StudyMaximumPagePosition ||
+		page.NextAfterPosition < page.AfterPosition || page.NextAfterPosition > StudyMaximumPagePosition ||
+		len(page.Items) > StudyMaximumPageItems {
+		return StudySessionPageDocument{}, errors.New("study session page bounds are invalid")
+	}
+	if len(page.Items) == 0 {
+		if !page.Complete || page.NextAfterPosition != page.AfterPosition {
+			return StudySessionPageDocument{}, errors.New("empty study session page cursor is invalid")
+		}
+	} else if page.AfterPosition == StudyMaximumPagePosition {
+		return StudySessionPageDocument{}, errors.New("study session page prefix is invalid")
+	}
+	seenItemIDs := make(map[uuid.UUID]struct{}, len(page.Items))
+	for index, projection := range *strict.Items {
+		expectedPosition := page.AfterPosition + index + 1
+		converted, conversionErr := strictStudyCardProjectionDocument(projection)
+		if conversionErr != nil || converted.Position != expectedPosition || expectedPosition > StudyMaximumPagePosition {
+			return StudySessionPageDocument{}, errors.New("study session page card projection is invalid")
+		}
+		if _, duplicate := seenItemIDs[converted.SessionItemID]; duplicate {
+			return StudySessionPageDocument{}, errors.New("study session page repeats an item identity")
+		}
+		seenItemIDs[converted.SessionItemID] = struct{}{}
+		page.Items[index] = converted
+	}
+	if len(page.Items) > 0 && page.NextAfterPosition != page.Items[len(page.Items)-1].Position {
+		return StudySessionPageDocument{}, errors.New("study session page next cursor is invalid")
+	}
+	exact, err := EncodeStudySessionPageDocument(page)
+	if err != nil || !bytes.Equal(exact, encoded) {
+		return StudySessionPageDocument{}, errors.New("study session page bytes are not exact typed JSON")
+	}
+	return page, nil
+}
+
+type strictStudySessionPage struct {
+	AfterPosition     *int                         `json:"after_position"`
+	Complete          *bool                        `json:"complete"`
+	Items             *[]strictStudyCardProjection `json:"items"`
+	NextAfterPosition *int                         `json:"next_after_position"`
+}
+
+type strictStudyCardProjection struct {
+	Back             *strictStudyCardBack        `json:"back"`
+	CardIdentity     *strictStudyUUID            `json:"card_identity"`
+	CardKind         *StudyCardKind              `json:"card_kind"`
+	Front            *strictStudyCardFront       `json:"front"`
+	LiveSourceIdeaID json.RawMessage             `json:"live_source_idea_id"`
+	Position         *int                        `json:"position"`
+	SelectionReason  *strictStudySelectionReason `json:"selection_reason"`
+	SessionItemID    *strictStudyUUID            `json:"session_item_id"`
+	SourceRevision   *strictStudySourceRevision  `json:"source_revision"`
+}
+
+type strictStudySourceRevision struct {
+	ContentRevision *string          `json:"content_revision"`
+	ContentSHA256   *string          `json:"content_sha256"`
+	SourceIdentity  *strictStudyUUID `json:"source_identity"`
+	SourceKind      *string          `json:"source_kind"`
+}
+
+type strictStudyUUID struct {
+	UUID uuid.UUID
+}
+
+func (value *strictStudyUUID) UnmarshalJSON(raw []byte) error {
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return errors.New("study UUID is not a string")
+	}
+	parsed, err := uuid.Parse(encoded)
+	if err != nil || parsed == uuid.Nil || parsed.String() != encoded {
+		return errors.New("study UUID is not in canonical wire form")
+	}
+	value.UUID = parsed
+	return nil
+}
+
+type strictStudyCardFront struct {
+	CanonicalName *string `json:"canonical_name"`
+}
+
+type strictStudyCardBack struct {
+	Definition *string         `json:"definition"`
+	Example    json.RawMessage `json:"example"`
+}
+
+type strictStudySelectionReason struct {
+	BoundaryAdjustment              *StudyBoundaryAdjustment `json:"boundary_adjustment"`
+	LatestPresentedIngestionOrdinal json.RawMessage          `json:"latest_presented_ingestion_ordinal"`
+	RatingRank                      *StudyRatingRank         `json:"rating_rank"`
+	TieBreakerSHA256                *string                  `json:"tie_breaker_sha256"`
+}
+
+func decodeStrictStudySessionPage(canonicalJSON []byte) (*strictStudySessionPage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(canonicalJSON))
+	decoder.DisallowUnknownFields()
+	var page strictStudySessionPage
+	if err := decoder.Decode(&page); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("trailing study session page JSON")
+		}
+		return nil, err
+	}
+	if page.AfterPosition == nil || page.Complete == nil || page.Items == nil || page.NextAfterPosition == nil {
+		return nil, errors.New("study session page omits required members")
+	}
+	return &page, nil
+}
+
+func strictStudyCardProjectionDocument(projection strictStudyCardProjection) (StudySessionPageCardProjection, error) {
+	if projection.Back == nil || projection.CardIdentity == nil || projection.CardIdentity.UUID == uuid.Nil ||
+		projection.CardKind == nil || projection.Front == nil || len(projection.LiveSourceIdeaID) == 0 ||
+		projection.Position == nil || projection.SelectionReason == nil || projection.SessionItemID == nil ||
+		projection.SessionItemID.UUID == uuid.Nil || projection.SourceRevision == nil {
+		return StudySessionPageCardProjection{}, errors.New("study card projection omits required members")
+	}
+	liveSourceIdeaID, err := decodeStrictStudyNullableUUID(projection.LiveSourceIdeaID)
+	if err != nil {
+		return StudySessionPageCardProjection{}, err
+	}
+	if projection.SourceRevision.ContentRevision == nil || projection.SourceRevision.ContentSHA256 == nil ||
+		projection.SourceRevision.SourceIdentity == nil || projection.SourceRevision.SourceIdentity.UUID == uuid.Nil ||
+		projection.SourceRevision.SourceKind == nil || projection.Front.CanonicalName == nil ||
+		projection.Back.Definition == nil || len(projection.Back.Example) == 0 ||
+		projection.SelectionReason.BoundaryAdjustment == nil ||
+		len(projection.SelectionReason.LatestPresentedIngestionOrdinal) == 0 ||
+		projection.SelectionReason.RatingRank == nil || projection.SelectionReason.TieBreakerSHA256 == nil {
+		return StudySessionPageCardProjection{}, errors.New("study card projection nested resource omits required members")
+	}
+	example, err := decodeStrictStudyNullableString(projection.Back.Example)
+	if err != nil {
+		return StudySessionPageCardProjection{}, err
+	}
+	latestPresentedOrdinal, err := decodeStrictStudyNullablePositiveInt64(
+		projection.SelectionReason.LatestPresentedIngestionOrdinal,
+	)
+	if err != nil {
+		return StudySessionPageCardProjection{}, err
+	}
+	item := StudySessionItem{
+		ID:                       projection.SessionItemID.UUID,
+		Position:                 *projection.Position,
+		CardKind:                 *projection.CardKind,
+		CardIdentity:             projection.CardIdentity.UUID,
+		HistoricalSourceKind:     *projection.SourceRevision.SourceKind,
+		HistoricalSourceIdentity: projection.SourceRevision.SourceIdentity.UUID,
+		LiveSourceIdeaID:         liveSourceIdeaID,
+		SourceContentRevision:    *projection.SourceRevision.ContentRevision,
+		SourceContentSHA256:      *projection.SourceRevision.ContentSHA256,
+		FrontCanonicalName:       *projection.Front.CanonicalName,
+		BackDefinition:           *projection.Back.Definition,
+		BackExample:              example,
+		SelectionReason: StudySelectionReason{
+			RatingRank:                      *projection.SelectionReason.RatingRank,
+			LatestPresentedIngestionOrdinal: latestPresentedOrdinal,
+			TieBreakerSHA256:                *projection.SelectionReason.TieBreakerSHA256,
+			BoundaryAdjustment:              *projection.SelectionReason.BoundaryAdjustment,
+		},
+	}
+	if item.Position > StudyMaximumPagePosition || (item.LiveSourceIdeaID != nil && *item.LiveSourceIdeaID == uuid.Nil) {
+		return StudySessionPageCardProjection{}, errors.New("study card projection identity or position is invalid")
+	}
+	if err := validateStudySessionItemProjection(item); err != nil {
+		return StudySessionPageCardProjection{}, err
+	}
+	exampleMarker := []byte{0}
+	exampleValue := []byte(nil)
+	if item.BackExample != nil {
+		exampleMarker[0] = 1
+		exampleValue = []byte(*item.BackExample)
+	}
+	contentSHA256, err := studydigest.CardContent(
+		[]byte(item.CardKind),
+		[]byte(item.CardIdentity.String()),
+		[]byte(item.HistoricalSourceIdentity.String()),
+		[]byte(item.FrontCanonicalName),
+		[]byte(item.BackDefinition),
+		exampleMarker,
+		exampleValue,
+	)
+	if err != nil || contentSHA256 != item.SourceContentSHA256 {
+		return StudySessionPageCardProjection{}, errors.New("study card projection content digest is inconsistent")
+	}
+	return StudySessionPageCardProjection{
+		SessionItemID:    item.ID,
+		Position:         item.Position,
+		CardKind:         item.CardKind,
+		CardIdentity:     item.CardIdentity,
+		LiveSourceIdeaID: cloneStudyUUIDPointer(item.LiveSourceIdeaID),
+		SourceRevision: StudySessionPageSourceRevision{
+			SourceKind:      item.HistoricalSourceKind,
+			SourceIdentity:  item.HistoricalSourceIdentity,
+			ContentRevision: item.SourceContentRevision,
+			ContentSHA256:   item.SourceContentSHA256,
+		},
+		Front: StudySessionPageCardFront{CanonicalName: item.FrontCanonicalName},
+		Back: StudySessionPageCardBack{
+			Definition: item.BackDefinition,
+			Example:    cloneStudyStringPointer(item.BackExample),
+		},
+		SelectionReason: StudySessionPageSelectionReason{
+			RatingRank:                      item.SelectionReason.RatingRank,
+			LatestPresentedIngestionOrdinal: cloneStudyInt64Pointer(item.SelectionReason.LatestPresentedIngestionOrdinal),
+			TieBreakerSHA256:                item.SelectionReason.TieBreakerSHA256,
+			BoundaryAdjustment:              item.SelectionReason.BoundaryAdjustment,
+		},
+	}, nil
+}
+
+func decodeStrictStudyNullableUUID(raw json.RawMessage) (*uuid.UUID, error) {
+	if bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return nil, errors.New("study nullable UUID is invalid")
+	}
+	value, err := uuid.Parse(encoded)
+	if err != nil || value == uuid.Nil || value.String() != encoded {
+		return nil, errors.New("study nullable UUID is invalid")
+	}
+	return &value, nil
+}
+
+func decodeStrictStudyNullableString(raw json.RawMessage) (*string, error) {
+	if bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, errors.New("study nullable string is invalid")
+	}
+	return &value, nil
+}
+
+func decodeStrictStudyNullablePositiveInt64(raw json.RawMessage) (*int64, error) {
+	if bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var value int64
+	if err := json.Unmarshal(raw, &value); err != nil || value < 1 {
+		return nil, errors.New("study nullable ingestion ordinal is invalid")
+	}
+	return &value, nil
+}
+
+func cloneStudyUUIDPointer(value *uuid.UUID) *uuid.UUID {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneStudyStringPointer(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneStudyInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
 // IsStudySHA256 reports whether a digest matches the lowercase frozen wire form.
 func IsStudySHA256(value string) bool {
 	return studySHA256Pattern.MatchString(value)
 }
 
-// SHA256Hex returns the lowercase content identity for canonical bytes.
+// SHA256Hex returns the lowercase content identity for exact supplied bytes.
 func SHA256Hex(value []byte) string {
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])

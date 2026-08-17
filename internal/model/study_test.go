@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	studydigest "lexinet/internal/study/digest"
 )
 
 func TestNormalizeStudyScopeSortsStableIdentitiesAndReferences(t *testing.T) {
@@ -127,6 +129,208 @@ func TestValidateStudySessionItemRejectsInvalidUTF8WithoutCoercion(t *testing.T)
 	item.FrontCanonicalName = string([]byte{0xff, 0xfe})
 	err := ValidateStudySessionItem(item)
 	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactAcceptsExactBoundedBytes(t *testing.T) {
+	canonical, err := EncodeStudySessionPageDocument(StudySessionPageDocument{
+		AfterPosition: -1, NextAfterPosition: -1, Complete: true, Items: []StudySessionPageCardProjection{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := StudySessionPageArtifact{
+		Request: StudySessionPageRequest{
+			AfterPosition: -1,
+			Limit:         StudyMaximumPageItems,
+		},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	}
+	if err := ValidateStudySessionPageArtifact(artifact); err != nil {
+		t.Fatalf("validate bounded session page artifact: %v", err)
+	}
+}
+
+func TestValidateStudySessionPageArtifactAcceptsStrictTypedCardProjection(t *testing.T) {
+	artifact := validStrictStudySessionPageArtifactFixture(t)
+	if err := ValidateStudySessionPageArtifact(artifact); err != nil {
+		t.Fatalf("validate strict typed session page artifact: %v", err)
+	}
+}
+
+func TestValidateStudySessionPageArtifactRejectsNonExactTypedBytes(t *testing.T) {
+	canonical := json.RawMessage(`{"after_position":-1,"complete":true,"items":[],"next_after_position":-1}`)
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	})
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsDuplicateMembers(t *testing.T) {
+	canonical := json.RawMessage(`{"after_position":-1,"after_position":-1,"complete":true,"items":[],"next_after_position":-1}`)
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	})
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsUnknownNestedMember(t *testing.T) {
+	artifact := validStrictStudySessionPageArtifactFixture(t)
+	artifact.CanonicalJSON = json.RawMessage(strings.Replace(
+		string(artifact.CanonicalJSON),
+		`"front":{"canonical_name":"Fixture Concept"}`,
+		`"front":{"canonical_name":"Fixture Concept","unexpected":true}`,
+		1,
+	))
+	artifact.CanonicalSHA256 = SHA256Hex(artifact.CanonicalJSON)
+	err := ValidateStudySessionPageArtifact(artifact)
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsNonPrefixPosition(t *testing.T) {
+	artifact := validStrictStudySessionPageArtifactFixture(t)
+	artifact.CanonicalJSON = json.RawMessage(strings.Replace(
+		string(artifact.CanonicalJSON),
+		`"position":0`,
+		`"position":1`,
+		1,
+	))
+	artifact.CanonicalJSON = json.RawMessage(strings.Replace(
+		string(artifact.CanonicalJSON),
+		`"next_after_position":0`,
+		`"next_after_position":1`,
+		1,
+	))
+	artifact.CanonicalSHA256 = SHA256Hex(artifact.CanonicalJSON)
+	err := ValidateStudySessionPageArtifact(artifact)
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsArbitraryItemShape(t *testing.T) {
+	canonical := json.RawMessage(`{"after_position":-1,"complete":true,"items":[{"canonical_name":"not-a-card-projection"}],"next_after_position":0}`)
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	})
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsCardContentDigestMismatch(t *testing.T) {
+	artifact := validStrictStudySessionPageArtifactFixture(t)
+	contentSHA256 := validStrictStudyCardContentSHA256(t)
+	artifact.CanonicalJSON = json.RawMessage(strings.Replace(
+		string(artifact.CanonicalJSON),
+		contentSHA256,
+		strings.Repeat("0", 64),
+		1,
+	))
+	artifact.CanonicalSHA256 = SHA256Hex(artifact.CanonicalJSON)
+	err := ValidateStudySessionPageArtifact(artifact)
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsNonCanonicalUUIDText(t *testing.T) {
+	artifact := validStrictStudySessionPageArtifactFixture(t)
+	artifact.CanonicalJSON = json.RawMessage(strings.Replace(
+		string(artifact.CanonicalJSON),
+		"33333333-3333-4333-8333-333333333333",
+		"33333333-3333-4333-8333-33333333333A",
+		1,
+	))
+	artifact.CanonicalSHA256 = SHA256Hex(artifact.CanonicalJSON)
+	err := ValidateStudySessionPageArtifact(artifact)
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsDigestMismatchWithoutExposingBytes(t *testing.T) {
+	const canary = "session-page-canary-must-not-escape"
+	canonical := json.RawMessage(`{"after_position":-1,"complete":true,"items":["` + canary + `"],"next_after_position":-1}`)
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: strings.Repeat("0", 64),
+	})
+	assertStudyErrorRedactsCanary(t, err, canary)
+}
+
+func TestValidateStudySessionPageArtifactRejectsRequestPageMismatch(t *testing.T) {
+	canonical := json.RawMessage(`{"after_position":0,"complete":true,"items":[],"next_after_position":0}`)
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	})
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func TestValidateStudySessionPageArtifactRejectsOversizedBytesBeforeDecode(t *testing.T) {
+	canonical := json.RawMessage(strings.Repeat("x", StudyMaximumSessionPageBytes+1))
+	err := ValidateStudySessionPageArtifact(StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	})
+	assertStudyErrorCode(t, err, StudyErrorCodeSchemaInvalid)
+}
+
+func validStrictStudySessionPageArtifactFixture(t *testing.T) StudySessionPageArtifact {
+	t.Helper()
+	liveSourceID := uuid.MustParse("44444444-4444-4444-8444-444444444444")
+	canonical, err := EncodeStudySessionPageDocument(StudySessionPageDocument{
+		AfterPosition:     -1,
+		NextAfterPosition: 0,
+		Complete:          true,
+		Items: []StudySessionPageCardProjection{{
+			SessionItemID:    uuid.MustParse("22222222-2222-4222-8222-222222222222"),
+			Position:         0,
+			CardKind:         StudyCardKindIdea,
+			CardIdentity:     uuid.MustParse("33333333-3333-4333-8333-333333333333"),
+			LiveSourceIdeaID: &liveSourceID,
+			SourceRevision: StudySessionPageSourceRevision{
+				SourceKind:      "idea",
+				SourceIdentity:  uuid.MustParse("33333333-3333-4333-8333-333333333333"),
+				ContentRevision: "fixture-revision-1",
+				ContentSHA256:   validStrictStudyCardContentSHA256(t),
+			},
+			Front: StudySessionPageCardFront{CanonicalName: "Fixture Concept"},
+			Back:  StudySessionPageCardBack{Definition: "A bounded model fixture."},
+			SelectionReason: StudySessionPageSelectionReason{
+				RatingRank:         StudyRatingRankUnseenUnrated,
+				TieBreakerSHA256:   strings.Repeat("e", 64),
+				BoundaryAdjustment: StudyBoundaryAdjustmentNone,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return StudySessionPageArtifact{
+		Request:         StudySessionPageRequest{AfterPosition: -1, Limit: 1},
+		CanonicalJSON:   canonical,
+		CanonicalSHA256: SHA256Hex(canonical),
+	}
+}
+
+func validStrictStudyCardContentSHA256(t *testing.T) string {
+	t.Helper()
+	digest, err := studydigest.CardContent(
+		[]byte(StudyCardKindIdea),
+		[]byte("33333333-3333-4333-8333-333333333333"),
+		[]byte("33333333-3333-4333-8333-333333333333"),
+		[]byte("Fixture Concept"),
+		[]byte("A bounded model fixture."),
+		[]byte{0},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("compute strict study card fixture digest: %v", err)
+	}
+	return digest
 }
 
 func TestStudyEventReceiptCodeMatchesOnlyItsDisposition(t *testing.T) {

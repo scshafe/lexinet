@@ -42,15 +42,41 @@ type cycleMaterializerConfiguration struct {
 // @canonical study_cycle_materializer -- all production cycle creation and
 // successor planning must cross this transaction-bound composition root.
 type CycleMaterializer struct {
-	scheduler     StudyScheduler
-	configuration cycleMaterializerConfiguration
+	scheduler       StudyScheduler
+	itemIDAllocator StudyItemIDAllocator
+	configuration   cycleMaterializerConfiguration
+}
+
+// StudyItemIDAllocator allocates one bounded batch of fresh persistence
+// identities after locked corpus capture proves the exact required count.
+// Implementations must return exactly requestedCount distinct nonzero UUIDs.
+//
+// @extension-point study_item_id_allocator -- composition roots may bind a
+// cryptographically random or deterministic test allocator without granting
+// either allocator corpus, profile, request, or persistence authority.
+type StudyItemIDAllocator interface {
+	AllocateStudyItemIDs(context.Context, int) ([]uuid.UUID, error)
+}
+
+// StudyItemIDAllocatorFunc adapts one function to StudyItemIDAllocator.
+type StudyItemIDAllocatorFunc func(context.Context, int) ([]uuid.UUID, error)
+
+// AllocateStudyItemIDs invokes the adapted item identity allocator.
+func (function StudyItemIDAllocatorFunc) AllocateStudyItemIDs(
+	ctx context.Context,
+	requestedCount int,
+) ([]uuid.UUID, error) {
+	return function(ctx, requestedCount)
 }
 
 // NewCanonicalCycleMaterializer binds the exact reviewed variety-first-v1
 // scheduler and projection namespace. Callers cannot inject or copy the
 // canonical configuration digest: it is derived from the scheduler package's
 // own immutable identity.
-func NewCanonicalCycleMaterializer(scheduler StudyScheduler) (*CycleMaterializer, error) {
+func NewCanonicalCycleMaterializer(
+	scheduler StudyScheduler,
+	itemIDAllocator StudyItemIDAllocator,
+) (*CycleMaterializer, error) {
 	canonicalScheduler, err := NewVarietyFirstV1()
 	if err != nil {
 		return nil, newCycleMaterializationError(
@@ -61,7 +87,7 @@ func NewCanonicalCycleMaterializer(scheduler StudyScheduler) (*CycleMaterializer
 			err,
 		)
 	}
-	return newCycleMaterializer(scheduler, cycleMaterializerConfiguration{
+	return newCycleMaterializer(scheduler, itemIDAllocator, cycleMaterializerConfiguration{
 		SchedulerName:                VarietyFirstV1Name,
 		SchedulerVersion:             VarietyFirstV1Version,
 		SchedulerConfigurationSHA256: canonicalScheduler.identity.configurationSHA256,
@@ -73,13 +99,14 @@ func NewCanonicalCycleMaterializer(scheduler StudyScheduler) (*CycleMaterializer
 // configuration drift. Production packages must use the canonical constructor.
 func newCycleMaterializer(
 	scheduler StudyScheduler,
+	itemIDAllocator StudyItemIDAllocator,
 	configuration cycleMaterializerConfiguration,
 ) (*CycleMaterializer, error) {
-	if scheduler == nil {
+	if scheduler == nil || itemIDAllocator == nil {
 		return nil, newCycleMaterializationError(
 			model.StudyErrorCodeSchemaInvalid,
-			"study cycle scheduler is required",
-			"scheduler",
+			"study cycle materializer dependencies are required",
+			"dependencies",
 			"invalid_configuration",
 			nil,
 		)
@@ -106,15 +133,19 @@ func newCycleMaterializer(
 			nil,
 		)
 	}
-	return &CycleMaterializer{scheduler: scheduler, configuration: configuration}, nil
+	return &CycleMaterializer{
+		scheduler:       scheduler,
+		itemIDAllocator: itemIDAllocator,
+		configuration:   configuration,
+	}, nil
 }
 
 // CycleMaterializationInput contains every retry-stable authority value that
-// is not obtained from the locked store. ItemIDs must exactly match the locked
-// eligible corpus size; an empty corpus requires no item identities.
+// is not obtained from the locked store. Item identities are deliberately not
+// request authority: the materializer allocates them only for a captured,
+// nonempty corpus after durable receipt replay has been ruled out.
 type CycleMaterializationInput struct {
 	SessionID                     uuid.UUID
-	ItemIDs                       []uuid.UUID
 	Principal                     model.StudyPrincipalID
 	CreationRequestID             uuid.UUID
 	NormalizedRequestSHA256       string
@@ -224,11 +255,14 @@ type CycleMaterializationResult struct {
 	AuthoritativePlan  *StudyPlan
 }
 
-// CommittedCycle is an independently readable session/item snapshot used by a
-// post-commit caller before optional shadow evaluation.
+// CommittedCycle is one independently readable session/item/receipt snapshot
+// used by a post-commit caller before optional shadow evaluation. Storage must
+// read all three authorities from one consistent committed snapshot and bind
+// Receipt to the exact principal, creation request, and canonical session.
 type CommittedCycle struct {
 	Session model.StudySession
 	Items   []model.StudySessionItem
+	Receipt model.StudyCreationReceipt
 }
 
 // CycleMaterializationStore is the narrow transaction capability required by
@@ -251,7 +285,7 @@ func (materializer *CycleMaterializer) Materialize(
 	store CycleMaterializationStore,
 	input CycleMaterializationInput,
 ) (*CycleMaterializationResult, error) {
-	if materializer == nil || materializer.scheduler == nil {
+	if materializer == nil || materializer.scheduler == nil || materializer.itemIDAllocator == nil {
 		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study cycle materializer is not constructed", "materializer", "invalid_configuration", nil)
 	}
 	if ctx == nil || store == nil {
@@ -302,9 +336,6 @@ func (materializer *CycleMaterializer) Materialize(
 	if err := validateCapturedMaterializationPath(input, captured); err != nil {
 		return nil, err
 	}
-	if len(input.ItemIDs) != len(captured.Sources) {
-		return nil, newCycleMaterializationError(model.StudyErrorCodeSchemaInvalid, "retry-stable study item identities do not match the captured corpus", "item_ids", "count_mismatch", nil)
-	}
 	effectivePredecessor := effectiveMaterializationPredecessor(input.PredecessorSessionID, captured)
 	persistenceInput := CyclePersistenceInput{
 		SessionID:                     input.SessionID,
@@ -342,7 +373,16 @@ func (materializer *CycleMaterializer) Materialize(
 			input,
 			nil,
 			nil,
+			nil,
 		)
+	}
+	itemIDs, err := allocateMaterializationItemIDs(
+		ctx,
+		materializer.itemIDAllocator,
+		len(captured.Sources),
+	)
+	if err != nil {
+		return nil, err
 	}
 	predecessorTail, err := readResolvedPredecessorTail(
 		ctx,
@@ -397,7 +437,7 @@ func (materializer *CycleMaterializer) Materialize(
 	}
 	persistenceInput.Lifecycle = model.StudySessionLifecycleActive
 	persistenceInput.Scheduler = cloneCycleSchedulerProvenancePointer(&plan.Scheduler)
-	persistenceInput.Items, err = bindMaterializationItems(input, captured, plan)
+	persistenceInput.Items, err = bindMaterializationItems(input.SessionID, itemIDs, captured, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +463,158 @@ func (materializer *CycleMaterializer) Materialize(
 		input,
 		stagedSnapshot,
 		stagedPlan,
+		itemIDs,
 	)
+}
+
+// ValidateCommittedCycleAuthority proves that a fresh committed snapshot
+// contains the exact frozen cycle and creation receipt returned by
+// Materialize. It permits only the documented mutable authority to advance:
+// session lifecycle/high-water fields and each item's live source link. The
+// returned snapshot is deeply detached from both caller-owned inputs.
+func (materializer *CycleMaterializer) ValidateCommittedCycleAuthority(
+	expected CyclePersistenceResult,
+	committed CommittedCycle,
+) (*CommittedCycle, error) {
+	if materializer == nil || materializer.scheduler == nil || materializer.itemIDAllocator == nil {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study cycle materializer is not constructed", "materializer", "invalid_configuration", nil)
+	}
+	committedPersistence := CyclePersistenceResult{
+		Session: committed.Session,
+		Items:   committed.Items,
+		Receipt: committed.Receipt,
+		Created: expected.Created,
+	}
+	if err := validateCyclePersistenceCloneBounds(&expected, nil); err != nil {
+		return nil, err
+	}
+	if err := validateCyclePersistenceCloneBounds(&committedPersistence, nil); err != nil {
+		return nil, err
+	}
+	if err := validateCommittedCycleReceiptAuthority(expected.Receipt, expected.Session); err != nil {
+		return nil, err
+	}
+	if err := validateCommittedCycleReceiptAuthority(committed.Receipt, committed.Session); err != nil {
+		return nil, err
+	}
+
+	_, expectedItems, err := reconstructPersistedCycleAuthority(
+		cloneCyclePersistenceResult(expected),
+		materializer.configuration,
+	)
+	if err != nil {
+		return nil, err
+	}
+	_, committedItems, err := reconstructPersistedCycleAuthority(
+		cloneCyclePersistenceResult(committedPersistence),
+		materializer.configuration,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !equalCycleCreationReceipts(expected.Receipt, committed.Receipt) {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "committed study creation receipt differs from materialized authority", "committed_cycle", "receipt_mismatch", nil)
+	}
+	if !equalCycleImmutableSessionAuthority(expected.Session, committed.Session) ||
+		!sameCommittedSessionExactScope(expected.Session.Scope, committed.Session.Scope) {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "committed study session differs from materialized authority", "committed_cycle", "session_mismatch", nil)
+	}
+	if err := validateCommittedSessionMutableAdvance(expected.Session, committed.Session); err != nil {
+		return nil, err
+	}
+	if !equalCycleImmutableSessionItems(expectedItems, committedItems) {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "committed study items differ from materialized authority", "committed_cycle", "items_mismatch", nil)
+	}
+
+	validated := &CommittedCycle{
+		Session: cloneCycleSession(committed.Session),
+		Items:   make([]model.StudySessionItem, len(committedItems)),
+		Receipt: cloneCycleCreationReceipt(committed.Receipt),
+	}
+	for index := range committedItems {
+		validated.Items[index] = cloneCycleSessionItem(committedItems[index])
+	}
+	return validated, nil
+}
+
+func validateCommittedCycleReceiptAuthority(
+	receipt model.StudyCreationReceipt,
+	session model.StudySession,
+) error {
+	if !receipt.StudyPrincipalID.Valid() || receipt.CreationRequestID == uuid.Nil ||
+		!model.IsStudySHA256(receipt.NormalizedRequestSHA256) || !receipt.Disposition.Valid() ||
+		receipt.CanonicalStudySessionID == uuid.Nil || receipt.LearnerProfileID == uuid.Nil ||
+		receipt.CreationReceiptAdjudicatedAt.IsZero() ||
+		receipt.CanonicalStudySessionID != session.ID || receipt.LearnerProfileID != session.LearnerProfileID ||
+		!sameCycleScope(receipt.Scope, session.Scope) || !sameCommittedSessionExactScope(receipt.Scope, session.Scope) {
+		return newCycleMaterializationError(model.StudyErrorCodeInternal, "committed study creation receipt authority is invalid", "committed_receipt", "invalid_authority", nil)
+	}
+	if err := validateCycleScopeAuthority(receipt.Scope, "committed_receipt"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func equalCycleCreationReceipts(left, right model.StudyCreationReceipt) bool {
+	return left.StudyPrincipalID == right.StudyPrincipalID &&
+		left.CreationRequestID == right.CreationRequestID &&
+		left.NormalizedRequestSHA256 == right.NormalizedRequestSHA256 &&
+		left.Disposition == right.Disposition &&
+		left.CanonicalStudySessionID == right.CanonicalStudySessionID &&
+		left.LearnerProfileID == right.LearnerProfileID &&
+		sameCycleScope(left.Scope, right.Scope) && sameCommittedSessionExactScope(left.Scope, right.Scope) &&
+		left.CreationReceiptAdjudicatedAt.Equal(right.CreationReceiptAdjudicatedAt)
+}
+
+func equalCycleImmutableSessionAuthority(left, right model.StudySession) bool {
+	return left.ID == right.ID &&
+		left.LearnerProfileID == right.LearnerProfileID &&
+		sameCycleScope(left.Scope, right.Scope) &&
+		left.CorpusSHA256 == right.CorpusSHA256 &&
+		equalCycleSchedulerProvenance(left.Scheduler, right.Scheduler) &&
+		sameCycleUUIDPointer(left.PredecessorStudySessionID, right.PredecessorStudySessionID) &&
+		left.CreatedAt.Equal(right.CreatedAt)
+}
+
+func equalCycleSchedulerProvenance(
+	left *model.StudySchedulerProvenance,
+	right *model.StudySchedulerProvenance,
+) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Name == right.Name && left.Version == right.Version &&
+		left.ConfigurationSHA256 == right.ConfigurationSHA256 &&
+		left.InputProfileIngestionHighWater == right.InputProfileIngestionHighWater &&
+		left.PlannedAt.Equal(right.PlannedAt) && left.Seed == right.Seed
+}
+
+func equalCycleImmutableSessionItems(left, right []model.StudySessionItem) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		leftItem := left[index]
+		rightItem := right[index]
+		if leftItem.ID != rightItem.ID || leftItem.StudySessionID != rightItem.StudySessionID ||
+			leftItem.Position != rightItem.Position || leftItem.CardKind != rightItem.CardKind ||
+			leftItem.CardIdentity != rightItem.CardIdentity ||
+			leftItem.HistoricalSourceKind != rightItem.HistoricalSourceKind ||
+			leftItem.HistoricalSourceIdentity != rightItem.HistoricalSourceIdentity ||
+			leftItem.SourceContentRevision != rightItem.SourceContentRevision ||
+			leftItem.SourceContentSHA256 != rightItem.SourceContentSHA256 ||
+			leftItem.FrontCanonicalName != rightItem.FrontCanonicalName ||
+			leftItem.BackDefinition != rightItem.BackDefinition ||
+			!sameCycleStringPointer(leftItem.BackExample, rightItem.BackExample) ||
+			leftItem.SelectionReason.RatingRank != rightItem.SelectionReason.RatingRank ||
+			!sameCycleInt64Pointer(leftItem.SelectionReason.LatestPresentedIngestionOrdinal, rightItem.SelectionReason.LatestPresentedIngestionOrdinal) ||
+			leftItem.SelectionReason.TieBreakerSHA256 != rightItem.SelectionReason.TieBreakerSHA256 ||
+			leftItem.SelectionReason.BoundaryAdjustment != rightItem.SelectionReason.BoundaryAdjustment ||
+			!leftItem.CreatedAt.Equal(rightItem.CreatedAt) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCycleMaterializationInput(input CycleMaterializationInput) error {
@@ -432,19 +623,6 @@ func validateCycleMaterializationInput(input CycleMaterializationInput) error {
 	}
 	if !model.IsStudySHA256(input.NormalizedRequestSHA256) || input.PlannedAt.IsZero() || !boundedSchedulerText(input.Seed, 128) || !boundedSchedulerText(input.LifecycleReasonCode, 128) {
 		return newCycleMaterializationError(model.StudyErrorCodeSchemaInvalid, "study cycle materialization provenance is invalid", "provenance", "invalid_input", nil)
-	}
-	if len(input.ItemIDs) > StudyMaximumSchedulingCards {
-		return newCycleMaterializationError(model.StudyErrorCodeRequestTooLarge, "study cycle item identities exceed the work bound", "item_ids", "work_bound_exceeded", nil)
-	}
-	seenItems := make(map[uuid.UUID]struct{}, len(input.ItemIDs))
-	for _, itemID := range input.ItemIDs {
-		if itemID == uuid.Nil {
-			return newCycleMaterializationError(model.StudyErrorCodeSchemaInvalid, "study cycle item identity is invalid", "item_ids", "invalid_input", nil)
-		}
-		if _, duplicate := seenItems[itemID]; duplicate {
-			return newCycleMaterializationError(model.StudyErrorCodeSchemaInvalid, "study cycle item identity is duplicated", "item_ids", "duplicate_identity", nil)
-		}
-		seenItems[itemID] = struct{}{}
 	}
 	if input.PredecessorSessionID != nil {
 		if *input.PredecessorSessionID == uuid.Nil || *input.PredecessorSessionID == input.SessionID {
@@ -463,6 +641,54 @@ func validateCycleMaterializationInput(input CycleMaterializationInput) error {
 		return newCycleMaterializationError(model.StudyErrorCodeSchemaInvalid, "study predecessor terminal reason is invalid", "predecessor_terminal_reason_code", "invalid_input", nil)
 	}
 	return nil
+}
+
+func allocateMaterializationItemIDs(
+	ctx context.Context,
+	allocator StudyItemIDAllocator,
+	requestedCount int,
+) (itemIDs []uuid.UUID, err error) {
+	if allocator == nil || requestedCount < 1 {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study item identity allocation boundary is invalid", "item_id_allocator", "invalid_configuration", nil)
+	}
+	if requestedCount > StudyMaximumSchedulingCards {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeRequestTooLarge, "study item identity request exceeds the work bound", "item_id_allocator", "work_bound_exceeded", nil)
+	}
+
+	completed := false
+	defer func() {
+		if recovered := recover(); recovered != nil || !completed {
+			itemIDs = nil
+			err = newCycleMaterializationError(model.StudyErrorCodeInternal, "study item identity allocator panicked", "item_id_allocator", "allocator_panic", nil)
+		}
+	}()
+	allocated, allocationErr := allocator.AllocateStudyItemIDs(ctx, requestedCount)
+	completed = true
+	if allocationErr != nil {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study item identity allocation failed", "item_id_allocator", "allocator_error", nil)
+	}
+	if allocated == nil {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study item identity allocator returned no identities", "item_id_allocator", "missing_result", nil)
+	}
+	if len(allocated) > StudyMaximumSchedulingCards {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeRequestTooLarge, "allocated study item identities exceed the work bound", "item_id_allocator", "work_bound_exceeded", nil)
+	}
+	if len(allocated) != requestedCount {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "allocated study item identity count is inconsistent", "item_id_allocator", "count_mismatch", nil)
+	}
+
+	detached := append([]uuid.UUID(nil), allocated...)
+	seen := make(map[uuid.UUID]struct{}, len(detached))
+	for _, itemID := range detached {
+		if itemID == uuid.Nil {
+			return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "allocated study item identity is invalid", "item_id_allocator", "invalid_identity", nil)
+		}
+		if _, duplicate := seen[itemID]; duplicate {
+			return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "allocated study item identity is duplicated", "item_id_allocator", "duplicate_identity", nil)
+		}
+		seen[itemID] = struct{}{}
+	}
+	return detached, nil
 }
 
 func validateCyclePersistenceCloneBounds(
@@ -927,10 +1153,14 @@ func equalCyclePlans(left, right StudyPlan) bool {
 }
 
 func bindMaterializationItems(
-	input CycleMaterializationInput,
+	sessionID uuid.UUID,
+	itemIDs []uuid.UUID,
 	captured CapturedEligibleCorpus,
 	plan StudyPlan,
 ) ([]model.StudySessionItem, error) {
+	if sessionID == uuid.Nil || len(itemIDs) != len(captured.Sources) || len(itemIDs) != len(plan.Cards) {
+		return nil, newCycleMaterializationError(model.StudyErrorCodeInternal, "study item identities do not match the staged plan", "item_ids", "count_mismatch", nil)
+	}
 	sources := make(map[uuid.UUID]MaterializationSource, len(captured.Sources))
 	for _, source := range captured.Sources {
 		sources[source.CardIdentity] = source
@@ -943,8 +1173,8 @@ func bindMaterializationItems(
 		}
 		liveSource := source.LiveSourceIdeaID
 		items[index] = model.StudySessionItem{
-			ID:                       input.ItemIDs[index],
-			StudySessionID:           input.SessionID,
+			ID:                       itemIDs[index],
+			StudySessionID:           sessionID,
 			Position:                 index,
 			CardKind:                 captured.Scope.Scope.CardKind,
 			CardIdentity:             source.CardIdentity,
@@ -972,6 +1202,7 @@ func reconstructMaterializedAuthority(
 	input CycleMaterializationInput,
 	stagedSnapshot *StudySchedulingSnapshot,
 	stagedPlan *StudyPlan,
+	stagedItemIDs []uuid.UUID,
 ) (*CycleMaterializationResult, error) {
 	if err := validateCyclePersistenceEnvelope(persistence, captured, input); err != nil {
 		return nil, err
@@ -1007,7 +1238,7 @@ func reconstructMaterializedAuthority(
 		if err := validateMaterializationPlan(configuration, *stagedSnapshot, *stagedPlan); err != nil {
 			return nil, err
 		}
-		expectedItems, err := bindMaterializationItems(input, captured, *stagedPlan)
+		expectedItems, err := bindMaterializationItems(input.SessionID, stagedItemIDs, captured, *stagedPlan)
 		if err != nil {
 			return nil, err
 		}
@@ -1617,7 +1848,13 @@ func cloneCyclePersistenceResult(result CyclePersistenceResult) CyclePersistence
 	for index := range result.Items {
 		clone.Items[index] = cloneCycleSessionItem(result.Items[index])
 	}
-	clone.Receipt.Scope = cloneCycleNormalizedScope(result.Receipt.Scope)
+	clone.Receipt = cloneCycleCreationReceipt(result.Receipt)
+	return clone
+}
+
+func cloneCycleCreationReceipt(receipt model.StudyCreationReceipt) model.StudyCreationReceipt {
+	clone := receipt
+	clone.Scope = cloneCycleNormalizedScope(receipt.Scope)
 	return clone
 }
 

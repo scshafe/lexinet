@@ -115,6 +115,7 @@ func TestCycleMaterializerResolvesReceiptBeforeMutableAuthority(t *testing.T) {
 			planCalls++
 			return canonical.scheduler.Plan(snapshot)
 		}),
+		cycleMaterializationItemIDAllocatorForTest(),
 		canonical.configuration,
 	)
 	if err != nil {
@@ -238,6 +239,7 @@ func TestCycleMaterializerReplaysWaitingReceiptBeforeNewCorpusCapture(t *testing
 		cycleMaterializationSchedulerFunc(func(StudySchedulingSnapshot) (StudyPlan, error) {
 			panic("scheduler must not run for receipt replay")
 		}),
+		cycleMaterializationItemIDAllocatorForTest(),
 		canonical.configuration,
 	)
 	if err != nil {
@@ -254,6 +256,333 @@ func TestCycleMaterializerReplaysWaitingReceiptBeforeNewCorpusCapture(t *testing
 		t.Fatalf("waiting receipt replay consulted mutable authority: result=%#v resolve=%d capture=%d prefix=%d projection=%d insert=%d",
 			replayed, store.resolveCalls, store.captureCalls, store.prefixCalls, store.projectionCalls, store.insertCalls)
 	}
+}
+
+func TestCycleMaterializerRejectsInvalidItemIDAllocatorResultsBeforePersistence(t *testing.T) {
+	t.Parallel()
+
+	const privateAllocatorText = "private-item-id-allocator-detail"
+	testCases := []struct {
+		name     string
+		allocate func(int) ([]uuid.UUID, error)
+		wantCode model.StudyErrorCode
+		reason   string
+	}{
+		{
+			name: "panic",
+			allocate: func(int) ([]uuid.UUID, error) {
+				panic(privateAllocatorText)
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "allocator_panic",
+		},
+		{
+			name: "error",
+			allocate: func(int) ([]uuid.UUID, error) {
+				return nil, errors.New(privateAllocatorText)
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "allocator_error",
+		},
+		{
+			name: "nil result",
+			allocate: func(int) ([]uuid.UUID, error) {
+				return nil, nil
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "missing_result",
+		},
+		{
+			name: "wrong count",
+			allocate: func(int) ([]uuid.UUID, error) {
+				return []uuid.UUID{}, nil
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "count_mismatch",
+		},
+		{
+			name: "zero identity",
+			allocate: func(int) ([]uuid.UUID, error) {
+				return []uuid.UUID{uuid.Nil}, nil
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "invalid_identity",
+		},
+		{
+			name: "duplicate identity",
+			allocate: func(int) ([]uuid.UUID, error) {
+				identity := uuid.New()
+				return []uuid.UUID{identity, identity}, nil
+			},
+			wantCode: model.StudyErrorCodeInternal,
+			reason:   "duplicate_identity",
+		},
+		{
+			name: "over work bound",
+			allocate: func(int) ([]uuid.UUID, error) {
+				return make([]uuid.UUID, StudyMaximumSchedulingCards+1), nil
+			},
+			wantCode: model.StudyErrorCodeRequestTooLarge,
+			reason:   "work_bound_exceeded",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			canonical := newCycleMaterializerForTest(t)
+			storeSourceCount := 1
+			if testCase.name == "duplicate identity" {
+				storeSourceCount = 2
+			}
+			store := newCycleMaterializationStoreForTest(t, storeSourceCount)
+			allocatorCalls := 0
+			materializer, err := newCycleMaterializer(
+				canonical.scheduler,
+				StudyItemIDAllocatorFunc(func(_ context.Context, requestedCount int) ([]uuid.UUID, error) {
+					allocatorCalls++
+					if store.captureCalls != 1 || requestedCount != len(store.captured.Sources) {
+						t.Fatalf("allocator timing/count = capture:%d requested:%d sources:%d", store.captureCalls, requestedCount, len(store.captured.Sources))
+					}
+					return testCase.allocate(requestedCount)
+				}),
+				canonical.configuration,
+			)
+			if err != nil {
+				t.Fatalf("construct allocator probe: %v", err)
+			}
+
+			_, err = materializer.Materialize(context.Background(), store, cycleMaterializationInputForTest(storeSourceCount))
+			assertCycleMaterializationError(t, err, testCase.wantCode, testCase.reason)
+			if allocatorCalls != 1 || store.prefixCalls != 0 || store.projectionCalls != 0 || store.insertCalls != 0 {
+				t.Fatalf("invalid allocation crossed boundary: allocator=%d prefix=%d projection=%d insert=%d",
+					allocatorCalls, store.prefixCalls, store.projectionCalls, store.insertCalls)
+			}
+			encoded, marshalErr := json.Marshal(err)
+			if marshalErr != nil {
+				t.Fatalf("marshal allocator failure: %v", marshalErr)
+			}
+			var studyError *model.StudyError
+			if !errors.As(err, &studyError) || studyError.Cause != nil || errors.Unwrap(err) != nil ||
+				strings.Contains(err.Error(), privateAllocatorText) || strings.Contains(string(encoded), privateAllocatorText) {
+				t.Fatalf("allocator failure leaked extension authority: %#v", err)
+			}
+		})
+	}
+}
+
+func TestCycleMaterializerDetachesAllocatedItemIDsAndSkipsAllocationForReplayAndEmptyCorpus(t *testing.T) {
+	t.Parallel()
+
+	t.Run("detached accepted allocation", func(t *testing.T) {
+		t.Parallel()
+		canonical := newCycleMaterializerForTest(t)
+		store := newCycleMaterializationStoreForTest(t, 2)
+		retained := []uuid.UUID{uuid.New(), uuid.New()}
+		firstAllocated := retained[0]
+		secondAllocated := retained[1]
+		materializer, err := newCycleMaterializer(
+			canonical.scheduler,
+			StudyItemIDAllocatorFunc(func(context.Context, int) ([]uuid.UUID, error) {
+				return retained, nil
+			}),
+			canonical.configuration,
+		)
+		if err != nil {
+			t.Fatalf("construct retaining allocator: %v", err)
+		}
+		result, err := materializer.Materialize(context.Background(), store, cycleMaterializationInputForTest(2))
+		if err != nil {
+			t.Fatalf("materialize retained allocation: %v", err)
+		}
+		retained[0] = uuid.New()
+		retained[1] = uuid.New()
+		if result.Persistence.Items[0].ID != firstAllocated || result.Persistence.Items[1].ID != secondAllocated ||
+			store.lastInsert.Items[0].ID != firstAllocated || store.lastInsert.Items[1].ID != secondAllocated {
+			t.Fatal("allocator-owned item identity slice remained aliased to persistence authority")
+		}
+	})
+
+	t.Run("receipt replay", func(t *testing.T) {
+		t.Parallel()
+		canonical := newCycleMaterializerForTest(t)
+		store := newCycleMaterializationStoreForTest(t, 1)
+		allocatorCalls := 0
+		materializer, err := newCycleMaterializer(
+			canonical.scheduler,
+			StudyItemIDAllocatorFunc(func(_ context.Context, requestedCount int) ([]uuid.UUID, error) {
+				allocatorCalls++
+				return cycleMaterializationItemIDAllocatorForTest().AllocateStudyItemIDs(context.Background(), requestedCount)
+			}),
+			canonical.configuration,
+		)
+		if err != nil {
+			t.Fatalf("construct replay allocator probe: %v", err)
+		}
+		input := cycleMaterializationInputForTest(1)
+		created, err := materializer.Materialize(context.Background(), store, input)
+		if err != nil {
+			t.Fatalf("create replay allocator fixture: %v", err)
+		}
+		persisted := cloneCyclePersistenceResult(created.Persistence)
+		persisted.Created = false
+		store.resolveOverride = func(ExistingCycleResolutionInput) (*ExistingCycleResolution, error) {
+			return &ExistingCycleResolution{
+				LearnerProfile: store.captured.LearnerProfile,
+				Scope:          cloneCycleNormalizedScope(store.captured.Scope),
+				Persistence:    cloneCyclePersistenceResult(persisted),
+			}, nil
+		}
+		if _, err := materializer.Materialize(context.Background(), store, input); err != nil {
+			t.Fatalf("replay committed allocation: %v", err)
+		}
+		if allocatorCalls != 1 || store.captureCalls != 1 {
+			t.Fatalf("receipt replay allocated or recaptured: allocator=%d capture=%d", allocatorCalls, store.captureCalls)
+		}
+	})
+
+	t.Run("empty corpus", func(t *testing.T) {
+		t.Parallel()
+		canonical := newCycleMaterializerForTest(t)
+		allocatorCalls := 0
+		materializer, err := newCycleMaterializer(
+			canonical.scheduler,
+			StudyItemIDAllocatorFunc(func(context.Context, int) ([]uuid.UUID, error) {
+				allocatorCalls++
+				return nil, errors.New("empty corpus must not allocate")
+			}),
+			canonical.configuration,
+		)
+		if err != nil {
+			t.Fatalf("construct empty allocator probe: %v", err)
+		}
+		store := newCycleMaterializationStoreForTest(t, 0)
+		if _, err := materializer.Materialize(context.Background(), store, cycleMaterializationInputForTest(0)); err != nil {
+			t.Fatalf("materialize empty corpus: %v", err)
+		}
+		if allocatorCalls != 0 || store.insertCalls != 1 {
+			t.Fatalf("empty corpus allocation/insert = allocator:%d insert:%d", allocatorCalls, store.insertCalls)
+		}
+	})
+}
+
+func TestCycleMaterializerValidatesExactCommittedImmutableAuthority(t *testing.T) {
+	t.Parallel()
+
+	materializer := newCycleMaterializerForTest(t)
+	store := newCycleMaterializationStoreForTest(t, 2)
+	created, err := materializer.Materialize(context.Background(), store, cycleMaterializationInputForTest(2))
+	if err != nil {
+		t.Fatalf("materialize committed authority fixture: %v", err)
+	}
+	expected := cloneCyclePersistenceResult(created.Persistence)
+	expected.Receipt.CreationReceiptAdjudicatedAt = time.Date(2026, 8, 17, 12, 0, 1, 0, time.UTC)
+	committed := CommittedCycle{
+		Session: cloneCycleSession(expected.Session),
+		Items:   cloneCyclePersistenceResult(expected).Items,
+		Receipt: cloneCycleCreationReceipt(expected.Receipt),
+	}
+
+	terminalizedAt := time.Date(2026, 8, 17, 12, 1, 0, 0, time.UTC)
+	terminalHighWater := expected.Session.Scheduler.InputProfileIngestionHighWater
+	successorID := uuid.New()
+	committed.Session.Lifecycle = model.StudySessionLifecycleCompleted
+	committed.Session.SuccessorStudySessionID = &successorID
+	committed.Session.ProfileIngestionHighWater = terminalHighWater + 3
+	committed.Session.StateVersion = 2
+	committed.Session.UpdatedAt = terminalizedAt
+	committed.Session.TerminalizedAt = &terminalizedAt
+	committed.Session.TerminalProfileIngestionHighWater = &terminalHighWater
+	committed.Items[0].LiveSourceIdeaID = nil
+
+	validated, err := materializer.ValidateCommittedCycleAuthority(expected, committed)
+	if err != nil {
+		t.Fatalf("validate committed mutable advance: %v", err)
+	}
+	if validated.Session.Lifecycle != model.StudySessionLifecycleCompleted ||
+		validated.Session.SuccessorStudySessionID == nil || *validated.Session.SuccessorStudySessionID != successorID ||
+		validated.Items[0].LiveSourceIdeaID != nil ||
+		validated.Receipt.CreationRequestID != expected.Receipt.CreationRequestID {
+		t.Fatalf("validated committed authority = %#v", validated)
+	}
+
+	committed.Session.Scope.CanonicalSelector[0] ^= 0xff
+	committed.Items[0].BackDefinition = "mutated caller-owned item"
+	committed.Receipt.Scope.CanonicalSelector[0] ^= 0xff
+	if sameCycleScope(validated.Session.Scope, committed.Session.Scope) ||
+		validated.Items[0].BackDefinition == committed.Items[0].BackDefinition ||
+		sameCycleScope(validated.Receipt.Scope, committed.Receipt.Scope) {
+		t.Fatal("validated committed authority retained caller-owned aliases")
+	}
+}
+
+func TestCycleMaterializerRejectsCommittedAuthoritySubstitution(t *testing.T) {
+	t.Parallel()
+
+	materializer := newCycleMaterializerForTest(t)
+	store := newCycleMaterializationStoreForTest(t, 1)
+	created, err := materializer.Materialize(context.Background(), store, cycleMaterializationInputForTest(1))
+	if err != nil {
+		t.Fatalf("materialize committed substitution fixture: %v", err)
+	}
+	expected := cloneCyclePersistenceResult(created.Persistence)
+	expected.Receipt.CreationReceiptAdjudicatedAt = time.Date(2026, 8, 17, 12, 0, 1, 0, time.UTC)
+	base := CommittedCycle{
+		Session: cloneCycleSession(expected.Session),
+		Items:   cloneCyclePersistenceResult(expected).Items,
+		Receipt: cloneCycleCreationReceipt(expected.Receipt),
+	}
+
+	testCases := []struct {
+		name   string
+		reason string
+		mutate func(*CommittedCycle)
+	}{
+		{
+			name:   "receipt adjudication changed",
+			reason: "receipt_mismatch",
+			mutate: func(candidate *CommittedCycle) {
+				candidate.Receipt.CreationReceiptAdjudicatedAt = candidate.Receipt.CreationReceiptAdjudicatedAt.Add(time.Second)
+			},
+		},
+		{
+			name:   "session creation changed",
+			reason: "session_mismatch",
+			mutate: func(candidate *CommittedCycle) {
+				candidate.Session.CreatedAt = candidate.Session.CreatedAt.Add(time.Second)
+			},
+		},
+		{
+			name:   "item creation changed",
+			reason: "items_mismatch",
+			mutate: func(candidate *CommittedCycle) {
+				candidate.Items[0].CreatedAt = candidate.Items[0].CreatedAt.Add(time.Second)
+			},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			candidate := CommittedCycle{
+				Session: cloneCycleSession(base.Session),
+				Items:   cloneCyclePersistenceResult(CyclePersistenceResult{Items: base.Items}).Items,
+				Receipt: cloneCycleCreationReceipt(base.Receipt),
+			}
+			testCase.mutate(&candidate)
+			validated, err := materializer.ValidateCommittedCycleAuthority(expected, candidate)
+			if validated != nil {
+				t.Fatalf("substituted committed authority returned data: %#v", validated)
+			}
+			assertCycleMaterializationError(t, err, model.StudyErrorCodeInternal, testCase.reason)
+		})
+	}
+
+	missingReceipt := base
+	missingReceipt.Receipt = model.StudyCreationReceipt{}
+	validated, err := materializer.ValidateCommittedCycleAuthority(expected, missingReceipt)
+	if validated != nil {
+		t.Fatalf("missing committed receipt returned data: %#v", validated)
+	}
+	assertCycleMaterializationError(t, err, model.StudyErrorCodeInternal, "invalid_authority")
 }
 
 func TestCycleMaterializerPreflightRejectsPredecessorConfusionAndInvalidBarrierShape(t *testing.T) {
@@ -388,7 +717,7 @@ func TestCycleMaterializerRejectsPanickingAndInvalidSchedulerOutput(t *testing.T
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			materializer, err := newCycleMaterializer(testCase.scheduler, configuration)
+			materializer, err := newCycleMaterializer(testCase.scheduler, cycleMaterializationItemIDAllocatorForTest(), configuration)
 			if err != nil {
 				t.Fatalf("construct materializer: %v", err)
 			}
@@ -451,6 +780,7 @@ func TestCycleMaterializerDetachesNestedSchedulerInputAndAcceptedOutput(t *testi
 				retained = plan
 				return plan, planErr
 			}),
+			cycleMaterializationItemIDAllocatorForTest(),
 			canonical.configuration,
 		)
 		if err != nil {
@@ -524,6 +854,7 @@ func TestCycleMaterializerRejectsUntrustedCorpusSchedulerAndPersistenceAuthority
 			cycleMaterializationSchedulerFunc(func(StudySchedulingSnapshot) (StudyPlan, error) {
 				return StudyPlan{}, errors.New(privateText)
 			}),
+			cycleMaterializationItemIDAllocatorForTest(),
 			configuration,
 		)
 		if err != nil {
@@ -1093,6 +1424,7 @@ func TestCycleMaterializerRejectsUnboundedStoreAndSchedulerReturnsBeforeDeepClon
 			cycleMaterializationSchedulerFunc(func(StudySchedulingSnapshot) (StudyPlan, error) {
 				return StudyPlan{Cards: make([]StudyPlannedCard, StudyMaximumSchedulingCards+1)}, nil
 			}),
+			cycleMaterializationItemIDAllocatorForTest(),
 			canonical.configuration,
 		)
 		if err != nil {
@@ -1298,10 +1630,12 @@ func TestNewCanonicalCycleMaterializerDerivesIdentityAndRejectsPrivateDrift(t *t
 	if err != nil {
 		t.Fatalf("construct scheduler: %v", err)
 	}
-	materializer, err := NewCanonicalCycleMaterializer(scheduler)
+	materializer, err := NewCanonicalCycleMaterializer(scheduler, cycleMaterializationItemIDAllocatorForTest())
 	if err != nil {
 		t.Fatalf("construct canonical materializer: %v", err)
 	}
+	_, err = NewCanonicalCycleMaterializer(scheduler, nil)
+	assertCycleMaterializationError(t, err, model.StudyErrorCodeSchemaInvalid, "invalid_configuration")
 	if materializer.configuration.SchedulerName != scheduler.identity.name ||
 		materializer.configuration.SchedulerVersion != scheduler.identity.version ||
 		materializer.configuration.SchedulerConfigurationSHA256 != scheduler.identity.configurationSHA256 ||
@@ -1324,7 +1658,7 @@ func TestNewCanonicalCycleMaterializerDerivesIdentityAndRejectsPrivateDrift(t *t
 		t.Run(testCase.name, func(t *testing.T) {
 			configuration := canonical
 			testCase.mutate(&configuration)
-			_, err := newCycleMaterializer(scheduler, configuration)
+			_, err := newCycleMaterializer(scheduler, cycleMaterializationItemIDAllocatorForTest(), configuration)
 			assertCycleMaterializationError(t, err, model.StudyErrorCodeSchemaInvalid, "invalid_configuration")
 		})
 	}
@@ -1526,21 +1860,26 @@ func newCycleMaterializerForTest(t *testing.T) *CycleMaterializer {
 	if err != nil {
 		t.Fatalf("construct scheduler: %v", err)
 	}
-	materializer, err := NewCanonicalCycleMaterializer(scheduler)
+	materializer, err := NewCanonicalCycleMaterializer(scheduler, cycleMaterializationItemIDAllocatorForTest())
 	if err != nil {
 		t.Fatalf("construct materializer: %v", err)
 	}
 	return materializer
 }
 
-func cycleMaterializationInputForTest(itemCount int) CycleMaterializationInput {
-	itemIDs := make([]uuid.UUID, itemCount)
-	for index := range itemIDs {
-		itemIDs[index] = uuid.New()
-	}
+func cycleMaterializationItemIDAllocatorForTest() StudyItemIDAllocator {
+	return StudyItemIDAllocatorFunc(func(_ context.Context, requestedCount int) ([]uuid.UUID, error) {
+		itemIDs := make([]uuid.UUID, requestedCount)
+		for index := range itemIDs {
+			itemIDs[index] = uuid.New()
+		}
+		return itemIDs, nil
+	})
+}
+
+func cycleMaterializationInputForTest(_ int) CycleMaterializationInput {
 	return CycleMaterializationInput{
 		SessionID:                     uuid.New(),
-		ItemIDs:                       itemIDs,
 		Principal:                     model.OperatorStudyPrincipalID(),
 		CreationRequestID:             uuid.New(),
 		NormalizedRequestSHA256:       model.SHA256Hex([]byte("materializer-request-" + uuid.NewString())),

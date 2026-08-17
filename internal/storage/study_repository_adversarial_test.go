@@ -419,8 +419,9 @@ func testEligibilitySnapshotLinearizesSourceDeletions(
 ) {
 	t.Helper()
 	testCases := []struct {
-		name    string
-		prepare func(*testing.T) (*model.Topic, *model.Idea, func(context.Context, *Repository) error)
+		name                    string
+		laterScopeMustFailStale bool
+		prepare                 func(*testing.T) (*model.Topic, *model.Idea, func(context.Context, *Repository) error)
 	}{
 		{
 			name: "definition_delete",
@@ -433,7 +434,8 @@ func testEligibilitySnapshotLinearizesSourceDeletions(
 			},
 		},
 		{
-			name: "topic_delete",
+			name:                    "topic_delete",
+			laterScopeMustFailStale: true,
 			prepare: func(t *testing.T) (*model.Topic, *model.Idea, func(context.Context, *Repository) error) {
 				topic := mustCreateAdversarialTopic(t, parentContext, repository, "topic-delete-linearization")
 				source := mustCreateAdversarialIdea(t, parentContext, repository, topic.Slug, "topic-delete-source")
@@ -505,7 +507,11 @@ func testEligibilitySnapshotLinearizesSourceDeletions(
 			assertAdversarialItemMatchesEligibleSource(t, result.Items[0], captured, source.ID)
 			persisted := mustReadAdversarialPlanItem(t, parentContext, repository, profileRef, plan.SessionID)
 			assertAdversarialItemMatchesEligibleSource(t, persisted, captured, source.ID)
-			assertAdversarialLaterEligibilityEmpty(t, parentContext, repository, scope, testCase.name)
+			if testCase.laterScopeMustFailStale {
+				assertAdversarialLaterEligibilityStateStale(t, parentContext, repository, scope, testCase.name)
+			} else {
+				assertAdversarialLaterEligibilityEmpty(t, parentContext, repository, scope, testCase.name)
+			}
 		})
 	}
 }
@@ -1031,6 +1037,27 @@ func assertAdversarialLaterEligibilityEmpty(
 	})
 	if err != nil {
 		t.Fatal(studyTestDatabaseError("STUDY_ADVERSARIAL.LATER_ELIGIBILITY_READ_FAILED", err))
+	}
+}
+
+func assertAdversarialLaterEligibilityStateStale(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+	scope model.StudyNormalizedScope,
+	label string,
+) {
+	t.Helper()
+	err := repository.WithStudyScopeTransaction(ctx, StudyScopeTransactionInput{
+		ProfileRef: adversarialProfileRef(label + "-later-cycle"),
+		Scope:      scope,
+	}, func(store StudyStoreTransaction) error {
+		_, listErr := store.ListEligibleSources(ctx)
+		return listErr
+	})
+	var studyError *model.StudyError
+	if !errors.As(err, &studyError) || studyError.Code != model.StudyErrorCodeStateStale {
+		t.Fatal(studyTestDatabaseError("STUDY_ADVERSARIAL.LATER_ELIGIBILITY_DID_NOT_FAIL_STALE", err))
 	}
 }
 
