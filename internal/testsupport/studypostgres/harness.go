@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	DSNEnvironment = "LEXINET_STUDY_TEST_DSN"
-	postgresImage  = "postgres:16-alpine"
-	namePrefix     = "lexinet-study-test-"
+	DSNEnvironment         = "LEXINET_STUDY_TEST_DSN"
+	postgresImage          = "postgres:16-alpine"
+	postgresDataTmpfsMount = "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=536870912,tmpfs-mode=0700"
+	namePrefix             = "lexinet-study-test-"
 )
 
 // Harness owns one isolated study integration database. An explicit DSN stays
@@ -61,12 +62,7 @@ func Start(t *testing.T) *Harness {
 	output, err := exec.CommandContext(
 		startContext,
 		"docker",
-		"run",
-		"--detach",
-		"--name", harness.containerName,
-		"--env", "POSTGRES_HOST_AUTH_METHOD=trust",
-		"--publish", "127.0.0.1::5432",
-		postgresImage,
+		ownedContainerRunArguments(harness.containerName)...,
 	).CombinedOutput()
 	if err != nil {
 		t.Fatalf("STUDY_TEST_POSTGRES.START_FAILED: cause_type=%T output=%s", err, boundedOutput(output))
@@ -334,12 +330,28 @@ func (harness *Harness) close(t *testing.T) {
 	defer cancelCleanup()
 	output, err := exec.CommandContext(
 		cleanupContext,
-		"docker", "rm", "--force", harness.containerName,
+		"docker", ownedContainerCleanupArguments(harness.containerName)...,
 	).CombinedOutput()
 	if err != nil {
 		t.Errorf("STUDY_TEST_POSTGRES.CLEANUP_FAILED: cause_type=%T output=%s", err, boundedOutput(output))
 	}
 	harness.owned = false
+}
+
+func ownedContainerRunArguments(containerName string) []string {
+	return []string{
+		"run",
+		"--detach",
+		"--name", containerName,
+		"--env", "POSTGRES_HOST_AUTH_METHOD=trust",
+		"--publish", "127.0.0.1::5432",
+		"--mount", postgresDataTmpfsMount,
+		postgresImage,
+	}
+}
+
+func ownedContainerCleanupArguments(containerName string) []string {
+	return []string{"rm", "--force", "--volumes", containerName}
 }
 
 func (harness *Harness) releaseExplicitOwnership(t *testing.T) {
