@@ -75,6 +75,7 @@ func NewRoot(opts *Options) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.Endpoint, "endpoint", "", "lexinet service endpoint")
 	root.PersistentFlags().StringVar(&opts.TokenFile, "token-file", "", "file containing bearer token")
 	root.AddCommand(
+		newStudyCommand(opts),
 		newSubmitCommand(opts),
 		newSubmissionCommand(opts),
 		newIdeaCommand(opts),
@@ -116,6 +117,29 @@ func writeCLIError(w io.Writer, jsonOut bool, code int, err error) {
 					"exit_code": code,
 				},
 			})
+			return
+		}
+		var studyClientError *StudyClientError
+		if errors.As(err, &studyClientError) {
+			safeStudyClientError := studyClientError.sanitized()
+			errorValue := map[string]any{
+				"message":   safeStudyClientError.Error(),
+				"retryable": safeStudyClientError.Retryable,
+				"exit_code": code,
+			}
+			if safeStudyClientError.StatusCode != 0 {
+				errorValue["status"] = safeStudyClientError.StatusCode
+			}
+			if safeStudyClientError.Code.Valid() {
+				errorValue["code"] = safeStudyClientError.Code
+			}
+			if safeStudyClientError.RequestID != "" {
+				errorValue["request_id"] = safeStudyClientError.RequestID
+			}
+			if safeStudyClientError.RetryAfter != "" {
+				errorValue["retry_after"] = safeStudyClientError.RetryAfter
+			}
+			_ = writeJSON(w, map[string]any{"error": errorValue})
 			return
 		}
 		var serviceErr *ServiceError
