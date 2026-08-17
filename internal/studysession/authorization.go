@@ -17,7 +17,9 @@ const (
 	StudyOperationSync           StudyOperation = "sync"
 )
 
-func (operation StudyOperation) valid() bool {
+// Valid is the @canonical study_operation_validation entry point. It reports
+// whether operation is one exact frozen study.v1 capability.
+func (operation StudyOperation) Valid() bool {
 	switch operation {
 	case StudyOperationCreateOrResume, StudyOperationGet, StudyOperationSync:
 		return true
@@ -69,7 +71,7 @@ func (OperatorStudyAuthorizer) AuthorizeStudy(_ context.Context, request StudyAu
 	if !request.Principal.Valid() {
 		return newStudySessionError(model.StudyErrorCodeUnauthorized)
 	}
-	if !request.Operation.valid() || !request.Stage.valid() {
+	if !request.Operation.Valid() || !request.Stage.valid() {
 		return newStudySessionError(model.StudyErrorCodeAuthorizationDenied)
 	}
 	if request.Principal.String() != model.OperatorStudyPrincipalID().String() {

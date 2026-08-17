@@ -10,6 +10,24 @@ import (
 	"lexinet/internal/model"
 )
 
+func TestStudyOperationValidAcceptsOnlyFrozenVocabulary(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []StudyOperation{
+		StudyOperationCreateOrResume,
+		StudyOperationGet,
+		StudyOperationSync,
+	} {
+		if !operation.Valid() {
+			t.Fatalf("valid operation rejected: %q", operation)
+		}
+	}
+	for _, operation := range []StudyOperation{"", "create", "read", "SYNC", " sync"} {
+		if operation.Valid() {
+			t.Fatalf("invalid operation accepted: %q", operation)
+		}
+	}
+}
+
 func TestOperatorStudyAuthorizerAllowsExactOperatorForEveryOperation(t *testing.T) {
 	t.Parallel()
 	authorizer := OperatorStudyAuthorizer{}

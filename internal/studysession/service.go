@@ -410,7 +410,7 @@ func (service *StudySessionService) beginSessionOperation(
 	if !principal.Valid() {
 		return studyOperationContext{}, nil, nil, newStudySessionError(model.StudyErrorCodeUnauthorized)
 	}
-	if !operation.valid() || sessionID == uuid.Nil {
+	if !operation.Valid() || sessionID == uuid.Nil {
 		return studyOperationContext{}, nil, nil, newStudySessionError(model.StudyErrorCodeSchemaInvalid)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, StudyAuthoritativeOperationTimeout)

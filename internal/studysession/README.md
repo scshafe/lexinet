@@ -17,8 +17,15 @@ coordinate storage calls themselves.
   `encoding/json` output.
 - `OperatorStudyAuthorizer` is the explicit Step 4 transition policy. It
   grants create, read, and sync only to the stable operator principal. It is an
-  authorization policy, not a missing check; Step 5 may replace the policy and
-  principal derivation without changing the service or repository interfaces.
+  authorization policy, not a missing check.
+- `ScopedStudyAuthorizer` is the `@canonical scoped_study_authorizer` policy.
+  It preserves the operator policy while granting bounded non-operator
+  principals only explicitly configured study operations and exact learner
+  profile references. Listener authentication derives those opaque principals;
+  bearer bytes and transport credentials never enter this package.
+- `StudyOperation.Valid` and `ValidStudyProfileRef` expose the exact operation
+  vocabulary and bounded learner-profile reference grammar to trusted
+  composition adapters without duplicating protocol validation.
 - `StudyAuthoritySource` is the only clock, cryptographic seed, session UUID,
   and session-item UUID authority. The cycle materializer invokes its item-ID
   allocator only after receipt preflight and locked nonempty corpus capture.

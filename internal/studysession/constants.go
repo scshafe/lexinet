@@ -15,12 +15,18 @@ const (
 	StudyGlobalAdmissionLimit       = 4
 	StudyPerPrincipalAdmissionLimit = 2
 
+	StudyMaximumScopedAuthorizationGrants              = 64
+	StudyMaximumScopedAuthorizationOperationsPerGrant  = 3
+	StudyMaximumScopedAuthorizationProfileRefsPerGrant = 32
+
 	StudyAuthoritativeOperationTimeout = 30 * time.Second
 )
 
 const (
-	studyLifecycleReasonCreated             = "study_session_created"
-	studyPredecessorTerminalReasonCompleted = "study_predecessor_cycle_completed"
+	studyLifecycleReasonCreated                    = "study_session_created"
+	studyPredecessorTerminalReasonCompleted        = "study_predecessor_cycle_completed"
+	studyScopedAuthorizationConfigurationOperation = "configure_scoped_study_authorizer"
+	studyScopedAuthorizationConfigurationField     = "scoped_study_authorization_grants"
 )
 
 var studyRequiredSemantics = [...]string{
