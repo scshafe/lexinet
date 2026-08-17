@@ -3,10 +3,13 @@ package storage
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"lexinet/internal/model"
@@ -21,6 +24,29 @@ type studySuccessorTestFixture struct {
 	StreamID   uuid.UUID
 }
 
+type studySuccessorProductionFixture struct {
+	ProfileRef string
+	Principal  model.StudyPrincipalID
+	Scope      model.StudyNormalizedScope
+	IdeaIDs    []uuid.UUID
+	Root       *StudyPlanInsertResult
+}
+
+type studySuccessorEventOutcome struct {
+	result *StudyEventSyncResult
+	err    error
+}
+
+type studySuccessorInsertOutcome struct {
+	result *StudyPlanInsertResult
+	err    error
+}
+
+type studySuccessorScopedInsertOperation func(
+	context.Context,
+	StudyStoreTransaction,
+) (*StudyPlanInsertResult, error)
+
 func TestStudySuccessorPlanPersistence(t *testing.T) {
 	harness := startStudyTestPostgres(t)
 	harness.migrateUp(t)
@@ -33,6 +59,21 @@ func TestStudySuccessorPlanPersistence(t *testing.T) {
 	t.Run("active predecessor completes once and concurrent creators converge", func(t *testing.T) {
 		testStudySuccessorActiveConvergence(t, ctx, pool, repository)
 	})
+	t.Run("production event adjudication supplies the successor barrier", func(t *testing.T) {
+		testStudySuccessorProductionEventBarrier(t, ctx, repository)
+	})
+	t.Run("production presented evidence exhausts every item exactly", func(t *testing.T) {
+		testStudySuccessorProductionMultiItemExhaustion(t, ctx, repository)
+	})
+	t.Run("production terminal collateral cannot satisfy exhaustion", func(t *testing.T) {
+		testStudySuccessorProductionTerminalCollateral(t, ctx, pool, repository)
+	})
+	t.Run("production streams cannot cross learner profiles", func(t *testing.T) {
+		testStudySuccessorProductionCrossProfileStream(t, ctx, pool, repository)
+	})
+	t.Run("production correction and successor serialize in both orders", func(t *testing.T) {
+		testStudySuccessorCorrectionSerialization(t, ctx, pool, repository)
+	})
 	t.Run("active predecessor rejects missing stale and unowned barriers", func(t *testing.T) {
 		testStudySuccessorActiveBarrierFailures(t, ctx, pool, repository)
 	})
@@ -42,6 +83,649 @@ func TestStudySuccessorPlanPersistence(t *testing.T) {
 	t.Run("callback failure rolls back predecessor and successor", func(t *testing.T) {
 		testStudySuccessorRollback(t, ctx, pool, repository)
 	})
+}
+
+func testStudySuccessorProductionEventBarrier(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+) {
+	t.Helper()
+	suffix := stringsForStudyFixture(uuid.NewString())
+	topic, err := repository.CreateTopic(ctx, model.CreateTopicInput{
+		Slug: "successor-production-event-" + suffix,
+		Name: "Successor production event " + suffix,
+	})
+	if err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_EVENT_TOPIC_CREATE_FAILED", err))
+	}
+	idea := mustCreateStudyIdea(t, ctx, repository, topic.Slug, "successor-production-event")
+	scope := mustStudyScope(t, topic.ID, topic.Slug)
+	profileRef := "successor-production-event-" + suffix
+	principal := model.OperatorStudyPrincipalID()
+
+	rootPlan := testStudyPlan(uuid.New(), uuid.New(), principal, idea.ID, 0, "successor-production-event-root", nil)
+	var root *StudyPlanInsertResult
+	err = repository.WithStudyScopeTransaction(
+		ctx,
+		StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
+		func(store StudyStoreTransaction) error {
+			if _, listErr := store.ListEligibleSources(ctx); listErr != nil {
+				return listErr
+			}
+			var insertErr error
+			root, insertErr = store.InsertPlanOnce(ctx, rootPlan)
+			return insertErr
+		},
+	)
+	if err != nil || root == nil || len(root.Items) != 1 {
+		t.Fatal("STUDY_SUCCESSOR.PRODUCTION_EVENT_ROOT_CREATE_FAILED")
+	}
+
+	streamID := uuid.New()
+	eventID := uuid.New()
+	syncResult, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               principal,
+		ProfileRef:              profileRef,
+		SessionID:               root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: model.SHA256Hex([]byte("successor-production-event-sync-" + suffix)),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    root.Session.StateVersion,
+		Events: []model.StudyEvent{{
+			ID:                 eventID,
+			ClientSequence:     1,
+			ProfileRef:         profileRef,
+			StudySessionItemID: root.Items[0].ID,
+			CardIdentity:       root.Items[0].CardIdentity,
+			ContentSHA256:      root.Items[0].SourceContentSHA256,
+			Kind:               model.StudyEventKindPresented,
+			ClientClockQuality: model.StudyClientClockQualityUnknown,
+		}},
+	})
+	if err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_EVENT_ADJUDICATION_FAILED", err))
+	}
+	if syncResult == nil || len(syncResult.Receipts) != 1 ||
+		syncResult.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		syncResult.Receipts[0].CanonicalStudyEventID == nil ||
+		*syncResult.Receipts[0].CanonicalStudyEventID != eventID ||
+		syncResult.Receipts[0].CanonicalProfileIngestionOrdinal == nil ||
+		*syncResult.Receipts[0].CanonicalProfileIngestionOrdinal != 1 ||
+		syncResult.Receipts[0].OriginatingStudyFlushReceiptID != syncResult.FlushReceipt.ID ||
+		syncResult.FlushReceipt.FirstClientSequence == nil ||
+		*syncResult.FlushReceipt.FirstClientSequence != 1 ||
+		syncResult.FlushReceipt.LastClientSequence == nil ||
+		*syncResult.FlushReceipt.LastClientSequence != 1 ||
+		syncResult.FlushReceipt.AcknowledgedThroughSequence != 1 ||
+		syncResult.FlushReceipt.ProfileIngestionHighWater != 1 ||
+		syncResult.FlushReceipt.StudySessionStateVersion != 2 ||
+		syncResult.Session.StateVersion != 2 {
+		t.Fatal("STUDY_SUCCESSOR.PRODUCTION_EVENT_BARRIER_INVALID")
+	}
+
+	predecessorID := root.Session.ID
+	successorInput := StudySuccessorPlanInsert{
+		Plan: testStudyPlan(
+			uuid.New(),
+			uuid.New(),
+			principal,
+			idea.ID,
+			syncResult.FlushReceipt.ProfileIngestionHighWater,
+			"successor-production-event-child",
+			&predecessorID,
+		),
+		PredecessorFlushReceiptID:     syncResult.FlushReceipt.ID,
+		PredecessorTerminalReasonCode: "cycle_exhausted",
+	}
+	var successor *StudyPlanInsertResult
+	err = repository.WithStudyScopeTransaction(
+		ctx,
+		StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
+		func(store StudyStoreTransaction) error {
+			if _, listErr := store.ListEligibleSources(ctx); listErr != nil {
+				return listErr
+			}
+			var insertErr error
+			successor, insertErr = store.InsertSuccessorPlanOnce(ctx, successorInput)
+			return insertErr
+		},
+	)
+	if err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_EVENT_SUCCESSOR_FAILED", err))
+	}
+	if successor == nil || !successor.Created || successor.Session.Lifecycle != model.StudySessionLifecycleActive ||
+		successor.Session.PredecessorStudySessionID == nil ||
+		*successor.Session.PredecessorStudySessionID != predecessorID {
+		t.Fatal("STUDY_SUCCESSOR.PRODUCTION_EVENT_SUCCESSOR_INVALID")
+	}
+	predecessor, err := repository.GetStudySession(ctx, profileRef, predecessorID)
+	if err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_EVENT_PREDECESSOR_READ_FAILED", err))
+	}
+	if predecessor.Lifecycle != model.StudySessionLifecycleCompleted ||
+		predecessor.StateVersion != 3 ||
+		predecessor.SuccessorStudySessionID == nil ||
+		*predecessor.SuccessorStudySessionID != successor.Session.ID ||
+		predecessor.TerminalProfileIngestionHighWater == nil ||
+		*predecessor.TerminalProfileIngestionHighWater != 1 {
+		t.Fatal("STUDY_SUCCESSOR.PRODUCTION_EVENT_PREDECESSOR_INVALID")
+	}
+}
+
+func testStudySuccessorProductionMultiItemExhaustion(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+) {
+	t.Helper()
+	fixture := newStudySuccessorProductionFixture(t, ctx, repository, "multi-item", 2)
+	streamID := uuid.New()
+	first, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               fixture.Principal,
+		ProfileRef:              fixture.ProfileRef,
+		SessionID:               fixture.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash("multi-item-first"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    fixture.Root.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 1, uuid.New(), model.StudyEventKindPresented, nil),
+		},
+	})
+	if err != nil || first == nil || len(first.Receipts) != 1 ||
+		first.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		first.FlushReceipt.ProfileIngestionHighWater != 1 || first.Session.StateVersion != 2 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.MULTI_ITEM.FIRST_PRESENTED_FAILED", err))
+	}
+
+	incompleteInput := studySuccessorProductionInput(
+		fixture,
+		first.FlushReceipt.ProfileIngestionHighWater,
+		first.FlushReceipt.ID,
+		"multi-item-incomplete",
+	)
+	result, err := insertStudySuccessorProductionPlan(ctx, repository, fixture, incompleteInput)
+	if result != nil {
+		t.Fatal("STUDY_SUCCESSOR.MULTI_ITEM.INCOMPLETE_CREATED_SUCCESSOR")
+	}
+	assertStudySuccessorError(t, err, model.StudyErrorCodeCycleNotExhausted)
+	predecessor, err := repository.GetStudySession(ctx, fixture.ProfileRef, fixture.Root.Session.ID)
+	if err != nil || predecessor.Lifecycle != model.StudySessionLifecycleActive ||
+		predecessor.StateVersion != first.Session.StateVersion || predecessor.SuccessorStudySessionID != nil {
+		t.Fatal("STUDY_SUCCESSOR.MULTI_ITEM.INCOMPLETE_MUTATED_PREDECESSOR")
+	}
+
+	second, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               fixture.Principal,
+		ProfileRef:              fixture.ProfileRef,
+		SessionID:               fixture.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash("multi-item-second"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    first.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[1], streamID, 2, uuid.New(), model.StudyEventKindPresented, nil),
+		},
+	})
+	if err != nil || second == nil || len(second.Receipts) != 1 ||
+		second.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		second.FlushReceipt.ProfileIngestionHighWater != 2 || second.Session.StateVersion != 3 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.MULTI_ITEM.SECOND_PRESENTED_FAILED", err))
+	}
+
+	completeInput := studySuccessorProductionInput(
+		fixture,
+		second.FlushReceipt.ProfileIngestionHighWater,
+		second.FlushReceipt.ID,
+		"multi-item-complete",
+	)
+	successor, err := insertStudySuccessorProductionPlan(ctx, repository, fixture, completeInput)
+	if err != nil || successor == nil || !successor.Created || len(successor.Items) != 2 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.MULTI_ITEM.SUCCESSOR_CREATE_FAILED", err))
+	}
+	predecessor, err = repository.GetStudySession(ctx, fixture.ProfileRef, fixture.Root.Session.ID)
+	if err != nil || predecessor.Lifecycle != model.StudySessionLifecycleCompleted ||
+		predecessor.StateVersion != 4 || predecessor.TerminalProfileIngestionHighWater == nil ||
+		*predecessor.TerminalProfileIngestionHighWater != 2 || predecessor.SuccessorStudySessionID == nil ||
+		*predecessor.SuccessorStudySessionID != successor.Session.ID {
+		t.Fatal("STUDY_SUCCESSOR.MULTI_ITEM.COMPLETED_PREDECESSOR_INVALID")
+	}
+}
+
+func testStudySuccessorProductionTerminalCollateral(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository *Repository,
+) {
+	t.Helper()
+	fixture := newStudySuccessorProductionFixture(t, ctx, repository, "terminal-collateral", 1)
+	streamID := uuid.New()
+	rating := model.StudyRatingGood
+	terminal, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               fixture.Principal,
+		ProfileRef:              fixture.ProfileRef,
+		SessionID:               fixture.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash("terminal-collateral"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    fixture.Root.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 1, uuid.New(), model.StudyEventKindPresented, nil),
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 2, uuid.New(), model.StudyEventKindRated, &rating),
+		},
+	})
+	if err != nil || terminal == nil || len(terminal.Receipts) != 2 ||
+		terminal.FlushReceipt.ProfileIngestionHighWater != 0 || terminal.Session.StateVersion != 2 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.TERMINAL_COLLATERAL.ADJUDICATION_FAILED", err))
+	}
+	for index := range terminal.Receipts {
+		receipt := terminal.Receipts[index]
+		if receipt.Disposition != model.StudyEventReceiptDispositionTerminalRejected ||
+			receipt.Code != model.StudyEventReceiptCodeTransitionInvalid ||
+			receipt.CanonicalStudyEventID != nil || receipt.CanonicalProfileIngestionOrdinal != nil ||
+			receipt.TerminalFailureClientSequence == nil || *receipt.TerminalFailureClientSequence != 2 ||
+			receipt.OriginatingStudyFlushReceiptID != terminal.FlushReceipt.ID {
+			t.Fatal("STUDY_SUCCESSOR.TERMINAL_COLLATERAL.RECEIPT_INVALID")
+		}
+	}
+
+	input := studySuccessorProductionInput(
+		fixture,
+		terminal.FlushReceipt.ProfileIngestionHighWater,
+		terminal.FlushReceipt.ID,
+		"terminal-collateral-successor",
+	)
+	result, err := insertStudySuccessorProductionPlan(ctx, repository, fixture, input)
+	if result != nil {
+		t.Fatal("STUDY_SUCCESSOR.TERMINAL_COLLATERAL.CREATED_SUCCESSOR")
+	}
+	assertStudySuccessorError(t, err, model.StudyErrorCodeCycleNotExhausted)
+
+	var canonicalPresentedCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM study_events
+		WHERE study_session_id = $1
+		  AND study_event_kind = 'presented'`, fixture.Root.Session.ID).Scan(&canonicalPresentedCount); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.TERMINAL_COLLATERAL.CANONICAL_READ_FAILED", err))
+	}
+	predecessor, readErr := repository.GetStudySession(ctx, fixture.ProfileRef, fixture.Root.Session.ID)
+	if canonicalPresentedCount != 0 || readErr != nil ||
+		predecessor.Lifecycle != model.StudySessionLifecycleActive || predecessor.StateVersion != 2 ||
+		predecessor.SuccessorStudySessionID != nil {
+		t.Fatal("STUDY_SUCCESSOR.TERMINAL_COLLATERAL.BARRIER_MUTATED_STATE")
+	}
+}
+
+func testStudySuccessorProductionCrossProfileStream(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository *Repository,
+) {
+	t.Helper()
+	owner := newStudySuccessorProductionFixture(t, ctx, repository, "stream-owner", 1)
+	other := newStudySuccessorProductionFixture(t, ctx, repository, "stream-other", 1)
+	streamID := uuid.New()
+	owned, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               owner.Principal,
+		ProfileRef:              owner.ProfileRef,
+		SessionID:               owner.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash("stream-owner"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    owner.Root.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(owner, owner.Root.Items[0], streamID, 1, uuid.New(), model.StudyEventKindPresented, nil),
+		},
+	})
+	if err != nil || owned == nil || owned.FlushReceipt.AcknowledgedThroughSequence != 1 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CROSS_PROFILE_STREAM.OWNER_SYNC_FAILED", err))
+	}
+
+	denied, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               other.Principal,
+		ProfileRef:              other.ProfileRef,
+		SessionID:               other.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash("stream-other"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    other.Root.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(other, other.Root.Items[0], streamID, 2, uuid.New(), model.StudyEventKindPresented, nil),
+		},
+	})
+	if denied != nil {
+		t.Fatal("STUDY_SUCCESSOR.CROSS_PROFILE_STREAM.DENIED_SYNC_RETURNED_RESULT")
+	}
+	assertStudySuccessorError(t, err, model.StudyErrorCodeAuthorizationDenied)
+
+	otherSession, readErr := repository.GetStudySession(ctx, other.ProfileRef, other.Root.Session.ID)
+	var streamCursor int64
+	var deniedReceiptCount int
+	if queryErr := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT adjudicated_through_client_sequence FROM study_client_streams WHERE client_stream_id = $1),
+			(SELECT count(*) FROM study_event_receipts WHERE client_stream_id = $1 AND client_sequence = 2)`,
+		streamID,
+	).Scan(&streamCursor, &deniedReceiptCount); queryErr != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CROSS_PROFILE_STREAM.STATE_READ_FAILED", queryErr))
+	}
+	if readErr != nil || otherSession.StateVersion != other.Root.Session.StateVersion ||
+		otherSession.ProfileIngestionHighWater != 0 || streamCursor != 1 || deniedReceiptCount != 0 {
+		t.Fatal("STUDY_SUCCESSOR.CROSS_PROFILE_STREAM.DENIAL_PERSISTED_STATE")
+	}
+}
+
+func testStudySuccessorCorrectionSerialization(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository *Repository,
+) {
+	t.Helper()
+	t.Run("correction commits before successor", func(t *testing.T) {
+		testStudySuccessorCorrectionFirst(t, ctx, pool, repository)
+	})
+	t.Run("successor commits before correction", func(t *testing.T) {
+		testStudySuccessorSuccessorFirst(t, ctx, pool, repository)
+	})
+}
+
+func testStudySuccessorCorrectionFirst(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository *Repository,
+) {
+	t.Helper()
+	fixture, initial, correctionInput := newStudySuccessorCorrectionFixture(
+		t,
+		ctx,
+		repository,
+		"correction-first",
+	)
+	staleSuccessorInput := studySuccessorProductionInput(
+		fixture,
+		initial.FlushReceipt.ProfileIngestionHighWater,
+		initial.FlushReceipt.ID,
+		"correction-first-stale-successor",
+	)
+
+	racingContext, cancelRacing := context.WithTimeout(ctx, 15*time.Second)
+	releaseCorrection := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCorrection) }) }
+	correctionAtCommit := make(chan int32, 1)
+	correctionDone := make(chan struct{})
+	correctionOutcomes := make(chan studySuccessorEventOutcome, 1)
+	successorDone := make(chan struct{})
+	successorOutcomes := make(chan studySuccessorInsertOutcome, 1)
+	successorStarted := false
+
+	correctionRepository := NewRepository(pool)
+	correctionRepository.studyEventBeforeCommit = func(hookContext context.Context, tx pgx.Tx) error {
+		var backendPID int32
+		if err := tx.QueryRow(hookContext, `SELECT pg_backend_pid()`).Scan(&backendPID); err != nil {
+			return err
+		}
+		select {
+		case correctionAtCommit <- backendPID:
+		case <-hookContext.Done():
+			return hookContext.Err()
+		}
+		select {
+		case <-releaseCorrection:
+			return nil
+		case <-hookContext.Done():
+			return hookContext.Err()
+		}
+	}
+	successorRepository, successorApplicationName, successorPool := newAdversarialWorkerRepository(
+		t,
+		racingContext,
+		pool,
+		"study_successor_correction_first",
+	)
+	defer func() {
+		cancelRacing()
+		release()
+		waitForStudySuccessorWorkerCleanup(t, correctionDone, "STUDY_SUCCESSOR.CORRECTION_FIRST.CORRECTION_CLEANUP_TIMEOUT")
+		if successorStarted {
+			waitForStudySuccessorWorkerCleanup(t, successorDone, "STUDY_SUCCESSOR.CORRECTION_FIRST.SUCCESSOR_CLEANUP_TIMEOUT")
+		}
+		correctionRepository.studyEventBeforeCommit = nil
+		successorPool.Close()
+	}()
+
+	go func() {
+		defer close(correctionDone)
+		result, err := correctionRepository.AdjudicateStudyEvents(racingContext, correctionInput)
+		correctionOutcomes <- studySuccessorEventOutcome{result: result, err: err}
+	}()
+	var correctionPID int32
+	select {
+	case correctionPID = <-correctionAtCommit:
+	case <-correctionDone:
+		outcome := <-correctionOutcomes
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.CORRECTION_DID_NOT_REACH_BARRIER", outcome.err))
+	case <-racingContext.Done():
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_FIRST.CORRECTION_BARRIER_TIMEOUT")
+	}
+
+	successorStarted = true
+	go func() {
+		defer close(successorDone)
+		result, err := insertStudySuccessorProductionPlan(
+			racingContext,
+			successorRepository,
+			fixture,
+			staleSuccessorInput,
+		)
+		successorOutcomes <- studySuccessorInsertOutcome{result: result, err: err}
+	}()
+	waitContext, cancelWait := context.WithTimeout(racingContext, 10*time.Second)
+	waiterPID, waitErr := waitForStudySuccessorPostgresBlock(
+		waitContext,
+		pool,
+		successorApplicationName,
+		correctionPID,
+		successorDone,
+	)
+	cancelWait()
+	if waitErr != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.SUCCESSOR_NOT_BLOCKED", waitErr))
+	}
+	if waiterPID == correctionPID {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_FIRST.BACKEND_IDENTITIES_COLLAPSED")
+	}
+	release()
+	if err := waitForStudySuccessorWorker(racingContext, correctionDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.CORRECTION_JOIN_FAILED", err))
+	}
+	if err := waitForStudySuccessorWorker(racingContext, successorDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.SUCCESSOR_JOIN_FAILED", err))
+	}
+	correctionRepository.studyEventBeforeCommit = nil
+	correctionOutcome := <-correctionOutcomes
+	if correctionOutcome.err != nil || correctionOutcome.result == nil ||
+		len(correctionOutcome.result.Receipts) != 1 ||
+		correctionOutcome.result.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		correctionOutcome.result.FlushReceipt.ProfileIngestionHighWater != 4 ||
+		correctionOutcome.result.Session.StateVersion != 3 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.CORRECTION_FAILED", correctionOutcome.err))
+	}
+	successorOutcome := <-successorOutcomes
+	if successorOutcome.result != nil {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_FIRST.STALE_SUCCESSOR_RETURNED_RESULT")
+	}
+	assertStudySuccessorError(t, successorOutcome.err, model.StudyErrorCodeFlushReceiptStale)
+
+	retryInput := studySuccessorProductionInput(
+		fixture,
+		correctionOutcome.result.FlushReceipt.ProfileIngestionHighWater,
+		correctionOutcome.result.FlushReceipt.ID,
+		"correction-first-current-successor",
+	)
+	successor, err := insertStudySuccessorProductionPlan(ctx, repository, fixture, retryInput)
+	if err != nil || successor == nil || !successor.Created {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_FIRST.RETRY_FAILED", err))
+	}
+	assertStudySuccessorPersistentSnapshot(t, ctx, repository, fixture, successor, 4, 4, 4)
+}
+
+func testStudySuccessorSuccessorFirst(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	repository *Repository,
+) {
+	t.Helper()
+	fixture, initial, correctionInput := newStudySuccessorCorrectionFixture(
+		t,
+		ctx,
+		repository,
+		"successor-first",
+	)
+	successorInput := studySuccessorProductionInput(
+		fixture,
+		initial.FlushReceipt.ProfileIngestionHighWater,
+		initial.FlushReceipt.ID,
+		"successor-first-successor",
+	)
+
+	racingContext, cancelRacing := context.WithTimeout(ctx, 15*time.Second)
+	releaseSuccessor := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSuccessor) }) }
+	successorHasLock := make(chan int32, 1)
+	successorDone := make(chan struct{})
+	successorOutcomes := make(chan studySuccessorInsertOutcome, 1)
+	correctionDone := make(chan struct{})
+	correctionOutcomes := make(chan studySuccessorEventOutcome, 1)
+	correctionStarted := false
+
+	correctionRepository, correctionApplicationName, correctionPool := newAdversarialWorkerRepository(
+		t,
+		racingContext,
+		pool,
+		"study_successor_successor_first",
+	)
+	defer func() {
+		cancelRacing()
+		release()
+		waitForStudySuccessorWorkerCleanup(t, successorDone, "STUDY_SUCCESSOR.SUCCESSOR_FIRST.SUCCESSOR_CLEANUP_TIMEOUT")
+		if correctionStarted {
+			waitForStudySuccessorWorkerCleanup(t, correctionDone, "STUDY_SUCCESSOR.SUCCESSOR_FIRST.CORRECTION_CLEANUP_TIMEOUT")
+		}
+		correctionPool.Close()
+	}()
+
+	go func() {
+		defer close(successorDone)
+		var result *StudyPlanInsertResult
+		err := repository.WithStudyScopeTransaction(
+			racingContext,
+			StudyScopeTransactionInput{ProfileRef: fixture.ProfileRef, Scope: fixture.Scope},
+			func(store StudyStoreTransaction) error {
+				concrete, ok := store.(*studyStoreTx)
+				if !ok {
+					return errors.New("STUDY_SUCCESSOR.SUCCESSOR_FIRST.STORE_TYPE_INVALID")
+				}
+				var backendPID int32
+				if queryErr := concrete.tx.QueryRow(racingContext, `SELECT pg_backend_pid()`).Scan(&backendPID); queryErr != nil {
+					return queryErr
+				}
+				select {
+				case successorHasLock <- backendPID:
+				case <-racingContext.Done():
+					return racingContext.Err()
+				}
+				select {
+				case <-releaseSuccessor:
+				case <-racingContext.Done():
+					return racingContext.Err()
+				}
+				if _, listErr := store.ListEligibleSources(racingContext); listErr != nil {
+					return listErr
+				}
+				var insertErr error
+				result, insertErr = store.InsertSuccessorPlanOnce(racingContext, successorInput)
+				return insertErr
+			},
+		)
+		successorOutcomes <- studySuccessorInsertOutcome{result: result, err: err}
+	}()
+	var successorPID int32
+	select {
+	case successorPID = <-successorHasLock:
+	case <-successorDone:
+		outcome := <-successorOutcomes
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.SUCCESSOR_DID_NOT_REACH_BARRIER", outcome.err))
+	case <-racingContext.Done():
+		t.Fatal("STUDY_SUCCESSOR.SUCCESSOR_FIRST.SUCCESSOR_BARRIER_TIMEOUT")
+	}
+
+	correctionStarted = true
+	go func() {
+		defer close(correctionDone)
+		result, err := correctionRepository.AdjudicateStudyEvents(racingContext, correctionInput)
+		correctionOutcomes <- studySuccessorEventOutcome{result: result, err: err}
+	}()
+	waitContext, cancelWait := context.WithTimeout(racingContext, 10*time.Second)
+	waiterPID, waitErr := waitForStudySuccessorPostgresBlock(
+		waitContext,
+		pool,
+		correctionApplicationName,
+		successorPID,
+		correctionDone,
+	)
+	cancelWait()
+	if waitErr != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.CORRECTION_NOT_BLOCKED", waitErr))
+	}
+	if waiterPID == successorPID {
+		t.Fatal("STUDY_SUCCESSOR.SUCCESSOR_FIRST.BACKEND_IDENTITIES_COLLAPSED")
+	}
+	release()
+	if err := waitForStudySuccessorWorker(racingContext, successorDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.SUCCESSOR_JOIN_FAILED", err))
+	}
+	if err := waitForStudySuccessorWorker(racingContext, correctionDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.CORRECTION_JOIN_FAILED", err))
+	}
+	successorOutcome := <-successorOutcomes
+	if successorOutcome.err != nil || successorOutcome.result == nil || !successorOutcome.result.Created {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.SUCCESSOR_FAILED", successorOutcome.err))
+	}
+	correctionOutcome := <-correctionOutcomes
+	if correctionOutcome.result != nil {
+		t.Fatal("STUDY_SUCCESSOR.SUCCESSOR_FIRST.STALE_CORRECTION_RETURNED_RESULT")
+	}
+	assertStudySuccessorError(t, correctionOutcome.err, model.StudyErrorCodeStateStale)
+	completedBeforeCorrection, err := repository.GetStudySession(ctx, fixture.ProfileRef, fixture.Root.Session.ID)
+	if err != nil || completedBeforeCorrection.Lifecycle != model.StudySessionLifecycleCompleted ||
+		completedBeforeCorrection.StateVersion != 3 ||
+		completedBeforeCorrection.TerminalProfileIngestionHighWater == nil ||
+		*completedBeforeCorrection.TerminalProfileIngestionHighWater != 3 ||
+		completedBeforeCorrection.SuccessorStudySessionID == nil ||
+		*completedBeforeCorrection.SuccessorStudySessionID != successorOutcome.result.Session.ID {
+		t.Fatal("STUDY_SUCCESSOR.SUCCESSOR_FIRST.PRE_CORRECTION_TERMINAL_SNAPSHOT_INVALID")
+	}
+
+	retryCorrection := correctionInput
+	retryCorrection.SyncRequestID = uuid.New()
+	retryCorrection.NormalizedRequestSHA256 = studySuccessorProductionHash("successor-first-correction-retry")
+	retryCorrection.ExpectedStateVersion = completedBeforeCorrection.StateVersion
+	corrected, err := repository.AdjudicateStudyEvents(ctx, retryCorrection)
+	if err != nil || corrected == nil || len(corrected.Receipts) != 1 ||
+		corrected.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		corrected.FlushReceipt.ProfileIngestionHighWater != 4 || corrected.Session.StateVersion != 4 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.SUCCESSOR_FIRST.CORRECTION_RETRY_FAILED", err))
+	}
+	assertStudySuccessorPersistentSnapshot(t, ctx, repository, fixture, successorOutcome.result, 3, 4, 4)
 }
 
 func testStudySuccessorActiveConvergence(
@@ -72,38 +756,34 @@ func testStudySuccessorActiveConvergence(
 		result *StudyPlanInsertResult
 		err    error
 	}
-	start := make(chan struct{})
-	ready := make(chan struct{}, len(plans))
-	outcomes := make(chan outcome, len(plans))
-	for index := range plans {
-		index := index
-		go func() {
-			ready <- struct{}{}
-			<-start
-			var result *StudyPlanInsertResult
-			err := repository.WithStudyScopeTransaction(
-				ctx,
-				StudyScopeTransactionInput{ProfileRef: fixture.ProfileRef, Scope: fixture.Scope},
-				func(store StudyStoreTransaction) error {
-					if current := store.NonterminalSession(); current != nil && current.ID == predecessorID {
-						if _, listErr := store.ListEligibleSources(ctx); listErr != nil {
-							return listErr
-						}
-					}
-					var insertErr error
-					result, insertErr = store.InsertSuccessorPlanOnce(ctx, plans[index])
-					return insertErr
-				},
-			)
-			outcomes <- outcome{index: index, result: result, err: err}
-		}()
-	}
-	for range plans {
-		<-ready
-	}
-	close(start)
-	first := <-outcomes
-	second := <-outcomes
+	contendedOutcomes := runStudySuccessorContendedScopeTransactions(
+		t,
+		ctx,
+		pool,
+		"active_converge",
+		fixture.ProfileRef,
+		fixture.Scope,
+		func(operationContext context.Context, store StudyStoreTransaction) (*StudyPlanInsertResult, error) {
+			sources, err := store.ListEligibleSources(operationContext)
+			if err != nil {
+				return nil, err
+			}
+			if len(sources) != 1 {
+				return nil, errors.New("STUDY_SUCCESSOR.CONVERGENCE.CORPUS_INVALID")
+			}
+			return store.InsertSuccessorPlanOnce(operationContext, plans[0])
+		},
+		func(operationContext context.Context, store StudyStoreTransaction) (*StudyPlanInsertResult, error) {
+			if current := store.NonterminalSession(); current != nil && current.ID == predecessorID {
+				if _, err := store.ListEligibleSources(operationContext); err != nil {
+					return nil, err
+				}
+			}
+			return store.InsertSuccessorPlanOnce(operationContext, plans[1])
+		},
+	)
+	first := outcome{index: 0, result: contendedOutcomes[0].result, err: contendedOutcomes[0].err}
+	second := outcome{index: 1, result: contendedOutcomes[1].result, err: contendedOutcomes[1].err}
 	for _, candidate := range []outcome{first, second} {
 		if candidate.err != nil {
 			t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONCURRENT_INSERT_FAILED", candidate.err))
@@ -419,47 +1099,39 @@ func testStudySuccessorWaitingReplacement(
 			PredecessorTerminalReasonCode: "eligible_corpus_available",
 		},
 	}
-	type waitingReplacementOutcome struct {
-		result *StudyPlanInsertResult
-		err    error
-	}
-	start := make(chan struct{})
-	ready := make(chan struct{}, len(activeInputs))
-	outcomes := make(chan waitingReplacementOutcome, len(activeInputs))
-	for index := range activeInputs {
-		index := index
-		go func() {
-			ready <- struct{}{}
-			<-start
-			var result *StudyPlanInsertResult
-			txErr := repository.WithStudyScopeTransaction(
-				ctx,
-				StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
-				func(store StudyStoreTransaction) error {
-					if current := store.NonterminalSession(); current != nil && current.ID == waitingID {
-						sources, listErr := store.ListEligibleSources(ctx)
-						if listErr != nil {
-							return listErr
-						}
-						if len(sources) != 1 {
-							return errors.New("STUDY_SUCCESSOR.WAITING_REPLACEMENT_CORPUS_INVALID")
-						}
-					}
-					var insertErr error
-					result, insertErr = store.InsertSuccessorPlanOnce(ctx, activeInputs[index])
-					return insertErr
-				},
-			)
-			outcomes <- waitingReplacementOutcome{result: result, err: txErr}
-		}()
-	}
-	for range activeInputs {
-		<-ready
-	}
-	close(start)
-	firstReplacement := <-outcomes
-	secondReplacement := <-outcomes
-	for _, outcome := range []waitingReplacementOutcome{firstReplacement, secondReplacement} {
+	contendedOutcomes := runStudySuccessorContendedScopeTransactions(
+		t,
+		ctx,
+		pool,
+		"waiting_replace",
+		profileRef,
+		scope,
+		func(operationContext context.Context, store StudyStoreTransaction) (*StudyPlanInsertResult, error) {
+			sources, err := store.ListEligibleSources(operationContext)
+			if err != nil {
+				return nil, err
+			}
+			if len(sources) != 1 {
+				return nil, errors.New("STUDY_SUCCESSOR.WAITING_REPLACEMENT_CORPUS_INVALID")
+			}
+			return store.InsertSuccessorPlanOnce(operationContext, activeInputs[0])
+		},
+		func(operationContext context.Context, store StudyStoreTransaction) (*StudyPlanInsertResult, error) {
+			if current := store.NonterminalSession(); current != nil && current.ID == waitingID {
+				sources, err := store.ListEligibleSources(operationContext)
+				if err != nil {
+					return nil, err
+				}
+				if len(sources) != 1 {
+					return nil, errors.New("STUDY_SUCCESSOR.WAITING_REPLACEMENT_CORPUS_INVALID")
+				}
+			}
+			return store.InsertSuccessorPlanOnce(operationContext, activeInputs[1])
+		},
+	)
+	firstReplacement := contendedOutcomes[0]
+	secondReplacement := contendedOutcomes[1]
+	for _, outcome := range []studySuccessorInsertOutcome{firstReplacement, secondReplacement} {
 		if outcome.err != nil || outcome.result == nil ||
 			outcome.result.Receipt.Disposition != model.StudyCreationDispositionSuccessor {
 			t.Fatal("STUDY_SUCCESSOR.CONCURRENT_WAITING_REPLACEMENT_FAILED")
@@ -562,6 +1234,471 @@ func testStudySuccessorRollback(
 	}
 	if successorCount != 0 || receiptCount != 0 || auditCount != 1 {
 		t.Fatal("STUDY_SUCCESSOR.ROLLBACK_PERSISTED_PARTIAL_STATE")
+	}
+}
+
+func newStudySuccessorProductionFixture(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+	label string,
+	itemCount int,
+) studySuccessorProductionFixture {
+	t.Helper()
+	if itemCount < 1 {
+		t.Fatal("STUDY_SUCCESSOR.PRODUCTION_FIXTURE.ITEM_COUNT_INVALID")
+	}
+	suffix := stringsForStudyFixture(uuid.NewString())
+	topic, err := repository.CreateTopic(ctx, model.CreateTopicInput{
+		Slug: "successor-production-" + label + "-" + suffix,
+		Name: "Successor production " + label + " " + suffix,
+	})
+	if err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_FIXTURE.TOPIC_CREATE_FAILED", err))
+	}
+	ideaIDs := make([]uuid.UUID, itemCount)
+	for index := range ideaIDs {
+		idea := mustCreateStudyIdea(t, ctx, repository, topic.Slug, label+"-item-"+stringsForStudyFixture(uuid.NewString()))
+		ideaIDs[index] = idea.ID
+	}
+	fixture := studySuccessorProductionFixture{
+		ProfileRef: "successor-production-" + label + "-" + suffix,
+		Principal:  model.OperatorStudyPrincipalID(),
+		Scope:      mustStudyScope(t, topic.ID, topic.Slug),
+		IdeaIDs:    ideaIDs,
+	}
+	plan := studySuccessorPlanForIdeas(
+		uuid.New(),
+		uuid.New(),
+		fixture.Principal,
+		ideaIDs,
+		0,
+		label+"-root-"+suffix,
+		nil,
+	)
+	err = repository.WithStudyScopeTransaction(
+		ctx,
+		StudyScopeTransactionInput{ProfileRef: fixture.ProfileRef, Scope: fixture.Scope},
+		func(store StudyStoreTransaction) error {
+			if _, listErr := store.ListEligibleSources(ctx); listErr != nil {
+				return listErr
+			}
+			var insertErr error
+			fixture.Root, insertErr = store.InsertPlanOnce(ctx, plan)
+			return insertErr
+		},
+	)
+	if err != nil || fixture.Root == nil || !fixture.Root.Created || len(fixture.Root.Items) != itemCount {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.PRODUCTION_FIXTURE.ROOT_CREATE_FAILED", err))
+	}
+	return fixture
+}
+
+func studySuccessorPlanForIdeas(
+	sessionID, requestID uuid.UUID,
+	principal model.StudyPrincipalID,
+	ideaIDs []uuid.UUID,
+	highWater int64,
+	label string,
+	predecessorID *uuid.UUID,
+) StudyPlanInsert {
+	plan := testStudyPlan(sessionID, requestID, principal, ideaIDs[0], highWater, label, predecessorID)
+	for index := 1; index < len(ideaIDs); index++ {
+		ideaID := ideaIDs[index]
+		item := plan.Items[0]
+		item.ID = uuid.New()
+		item.Position = index
+		item.CardIdentity = ideaID
+		item.HistoricalSourceIdentity = ideaID
+		item.LiveSourceIdeaID = &ideaID
+		item.SelectionReason.TieBreakerSHA256 = model.SHA256Hex([]byte(label + "-tie-" + ideaID.String()))
+		plan.Items = append(plan.Items, item)
+	}
+	return plan
+}
+
+func studySuccessorProductionInput(
+	fixture studySuccessorProductionFixture,
+	highWater int64,
+	flushReceiptID uuid.UUID,
+	label string,
+) StudySuccessorPlanInsert {
+	predecessorID := fixture.Root.Session.ID
+	return StudySuccessorPlanInsert{
+		Plan: studySuccessorPlanForIdeas(
+			uuid.New(),
+			uuid.New(),
+			fixture.Principal,
+			fixture.IdeaIDs,
+			highWater,
+			label,
+			&predecessorID,
+		),
+		PredecessorFlushReceiptID:     flushReceiptID,
+		PredecessorTerminalReasonCode: "cycle_exhausted",
+	}
+}
+
+func insertStudySuccessorProductionPlan(
+	ctx context.Context,
+	repository *Repository,
+	fixture studySuccessorProductionFixture,
+	input StudySuccessorPlanInsert,
+) (*StudyPlanInsertResult, error) {
+	var result *StudyPlanInsertResult
+	err := repository.WithStudyScopeTransaction(
+		ctx,
+		StudyScopeTransactionInput{ProfileRef: fixture.ProfileRef, Scope: fixture.Scope},
+		func(store StudyStoreTransaction) error {
+			if _, listErr := store.ListEligibleSources(ctx); listErr != nil {
+				return listErr
+			}
+			var insertErr error
+			result, insertErr = store.InsertSuccessorPlanOnce(ctx, input)
+			return insertErr
+		},
+	)
+	return result, err
+}
+
+func studySuccessorProductionEvent(
+	fixture studySuccessorProductionFixture,
+	item model.StudySessionItem,
+	streamID uuid.UUID,
+	sequence int64,
+	eventID uuid.UUID,
+	kind model.StudyEventKind,
+	rating *model.StudyRating,
+) model.StudyEvent {
+	event := model.StudyEvent{
+		ID:                 eventID,
+		ClientSequence:     sequence,
+		ProfileRef:         fixture.ProfileRef,
+		StudySessionItemID: item.ID,
+		CardIdentity:       item.CardIdentity,
+		ContentSHA256:      item.SourceContentSHA256,
+		Kind:               kind,
+		ClientClockQuality: model.StudyClientClockQualityUnknown,
+		ClientStreamID:     streamID,
+	}
+	if rating != nil {
+		copyOfRating := *rating
+		event.Rating = &copyOfRating
+	}
+	return event
+}
+
+func studySuccessorProductionHash(label string) string {
+	return model.SHA256Hex([]byte("study-successor-production:" + label))
+}
+
+func newStudySuccessorCorrectionFixture(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+	label string,
+) (studySuccessorProductionFixture, *StudyEventSyncResult, StudyEventSyncInput) {
+	t.Helper()
+	fixture := newStudySuccessorProductionFixture(t, ctx, repository, label, 1)
+	streamID := uuid.New()
+	rating := model.StudyRatingGood
+	ratedID := uuid.New()
+	initial, err := repository.AdjudicateStudyEvents(ctx, StudyEventSyncInput{
+		Principal:               fixture.Principal,
+		ProfileRef:              fixture.ProfileRef,
+		SessionID:               fixture.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash(label + "-initial"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    fixture.Root.Session.StateVersion,
+		Events: []model.StudyEvent{
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 1, uuid.New(), model.StudyEventKindPresented, nil),
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 2, uuid.New(), model.StudyEventKindRevealed, nil),
+			studySuccessorProductionEvent(fixture, fixture.Root.Items[0], streamID, 3, ratedID, model.StudyEventKindRated, &rating),
+		},
+	})
+	if err != nil || initial == nil || len(initial.Receipts) != 3 ||
+		initial.Receipts[0].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		initial.Receipts[1].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		initial.Receipts[2].Disposition != model.StudyEventReceiptDispositionAccepted ||
+		initial.FlushReceipt.AcknowledgedThroughSequence != 3 ||
+		initial.FlushReceipt.ProfileIngestionHighWater != 3 || initial.Session.StateVersion != 2 {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CORRECTION_RACE.INITIAL_SYNC_FAILED", err))
+	}
+	correctionEvent := studySuccessorProductionEvent(
+		fixture,
+		fixture.Root.Items[0],
+		streamID,
+		4,
+		uuid.New(),
+		model.StudyEventKindRatingVoided,
+		nil,
+	)
+	correctionEvent.RatingEventID = &ratedID
+	correctionInput := StudyEventSyncInput{
+		Principal:               fixture.Principal,
+		ProfileRef:              fixture.ProfileRef,
+		SessionID:               fixture.Root.Session.ID,
+		SyncRequestID:           uuid.New(),
+		NormalizedRequestSHA256: studySuccessorProductionHash(label + "-correction"),
+		ClientStreamID:          streamID,
+		ExpectedStateVersion:    initial.Session.StateVersion,
+		Events:                  []model.StudyEvent{correctionEvent},
+	}
+	return fixture, initial, correctionInput
+}
+
+func assertStudySuccessorPersistentSnapshot(
+	t *testing.T,
+	ctx context.Context,
+	repository *Repository,
+	fixture studySuccessorProductionFixture,
+	created *StudyPlanInsertResult,
+	expectedTerminalHighWater int64,
+	expectedPredecessorStateVersion int64,
+	expectedProfileHighWater int64,
+) {
+	t.Helper()
+	if created == nil || created.Session.Scheduler == nil ||
+		created.Session.Scheduler.InputProfileIngestionHighWater != expectedTerminalHighWater {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_RACE.CREATED_SNAPSHOT_INVALID")
+	}
+	predecessor, predecessorErr := repository.GetStudySession(ctx, fixture.ProfileRef, fixture.Root.Session.ID)
+	successor, successorErr := repository.GetStudySession(ctx, fixture.ProfileRef, created.Session.ID)
+	items, itemsErr := repository.ListStudySessionItems(ctx, fixture.ProfileRef, created.Session.ID)
+	profile, profileErr := repository.GetStudyLearnerProfile(ctx, fixture.ProfileRef)
+	if predecessorErr != nil || successorErr != nil || itemsErr != nil || profileErr != nil {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_RACE.SNAPSHOT_READ_FAILED")
+	}
+	if profile.ProfileIngestionHighWater != expectedProfileHighWater ||
+		predecessor.Lifecycle != model.StudySessionLifecycleCompleted ||
+		predecessor.StateVersion != expectedPredecessorStateVersion ||
+		predecessor.TerminalProfileIngestionHighWater == nil ||
+		*predecessor.TerminalProfileIngestionHighWater != expectedTerminalHighWater ||
+		predecessor.SuccessorStudySessionID == nil || *predecessor.SuccessorStudySessionID != created.Session.ID {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_RACE.TERMINAL_SNAPSHOT_CHANGED")
+	}
+	if successor.ID != created.Session.ID || successor.Lifecycle != model.StudySessionLifecycleActive ||
+		successor.StateVersion != created.Session.StateVersion || successor.CorpusSHA256 != created.Session.CorpusSHA256 ||
+		successor.PredecessorStudySessionID == nil || *successor.PredecessorStudySessionID != fixture.Root.Session.ID ||
+		!reflect.DeepEqual(successor.Scope, created.Session.Scope) ||
+		!reflect.DeepEqual(successor.Scheduler, created.Session.Scheduler) ||
+		!reflect.DeepEqual(items, created.Items) {
+		t.Fatal("STUDY_SUCCESSOR.CORRECTION_RACE.SUCCESSOR_SNAPSHOT_CHANGED")
+	}
+}
+
+func runStudySuccessorContendedScopeTransactions(
+	t *testing.T,
+	ctx context.Context,
+	observerPool *pgxpool.Pool,
+	label string,
+	profileRef string,
+	scope model.StudyNormalizedScope,
+	holderOperation studySuccessorScopedInsertOperation,
+	waiterOperation studySuccessorScopedInsertOperation,
+) [2]studySuccessorInsertOutcome {
+	t.Helper()
+	tracingContext, cancelRacing := context.WithTimeout(ctx, 15*time.Second)
+	holderRepository, holderApplicationName, holderPool := newAdversarialWorkerRepository(
+		t,
+		tracingContext,
+		observerPool,
+		label+"_holder",
+	)
+	defer holderPool.Close()
+	waiterRepository, waiterApplicationName, waiterPool := newAdversarialWorkerRepository(
+		t,
+		tracingContext,
+		observerPool,
+		label+"_waiter",
+	)
+	defer waiterPool.Close()
+	if holderApplicationName == waiterApplicationName {
+		cancelRacing()
+		t.Fatal("STUDY_SUCCESSOR.CONTENTION.APPLICATION_IDENTITIES_COLLAPSED")
+	}
+
+	releaseHolder := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
+	holderHasLock := make(chan int32, 1)
+	holderDone := make(chan struct{})
+	waiterDone := make(chan struct{})
+	holderOutcomes := make(chan studySuccessorInsertOutcome, 1)
+	waiterOutcomes := make(chan studySuccessorInsertOutcome, 1)
+	holderStarted := false
+	waiterStarted := false
+	defer func() {
+		cancelRacing()
+		release()
+		if holderStarted {
+			waitForStudySuccessorWorkerCleanup(t, holderDone, "STUDY_SUCCESSOR.CONTENTION.HOLDER_CLEANUP_TIMEOUT")
+		}
+		if waiterStarted {
+			waitForStudySuccessorWorkerCleanup(t, waiterDone, "STUDY_SUCCESSOR.CONTENTION.WAITER_CLEANUP_TIMEOUT")
+		}
+	}()
+
+	holderStarted = true
+	go func() {
+		defer close(holderDone)
+		var result *StudyPlanInsertResult
+		err := holderRepository.WithStudyScopeTransaction(
+			tracingContext,
+			StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
+			func(store StudyStoreTransaction) error {
+				concrete, ok := store.(*studyStoreTx)
+				if !ok {
+					return errors.New("STUDY_SUCCESSOR.CONTENTION.HOLDER_STORE_TYPE_INVALID")
+				}
+				var backendPID int32
+				if queryErr := concrete.tx.QueryRow(tracingContext, `SELECT pg_backend_pid()`).Scan(&backendPID); queryErr != nil {
+					return queryErr
+				}
+				select {
+				case holderHasLock <- backendPID:
+				case <-tracingContext.Done():
+					return tracingContext.Err()
+				}
+				select {
+				case <-releaseHolder:
+				case <-tracingContext.Done():
+					return tracingContext.Err()
+				}
+				var operationErr error
+				result, operationErr = holderOperation(tracingContext, store)
+				return operationErr
+			},
+		)
+		holderOutcomes <- studySuccessorInsertOutcome{result: result, err: err}
+	}()
+
+	var holderPID int32
+	select {
+	case holderPID = <-holderHasLock:
+	case <-holderDone:
+		outcome := <-holderOutcomes
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONTENTION.HOLDER_DID_NOT_ACQUIRE_LOCK", outcome.err))
+	case <-tracingContext.Done():
+		t.Fatal("STUDY_SUCCESSOR.CONTENTION.HOLDER_LOCK_TIMEOUT")
+	}
+	var holderIdentityMatches bool
+	if err := observerPool.QueryRow(tracingContext, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid = $1
+			  AND application_name = $2
+		)`, holderPID, holderApplicationName).Scan(&holderIdentityMatches); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONTENTION.HOLDER_IDENTITY_READ_FAILED", err))
+	}
+	if !holderIdentityMatches {
+		t.Fatal("STUDY_SUCCESSOR.CONTENTION.HOLDER_IDENTITY_MISMATCH")
+	}
+
+	waiterStarted = true
+	go func() {
+		defer close(waiterDone)
+		var result *StudyPlanInsertResult
+		err := waiterRepository.WithStudyScopeTransaction(
+			tracingContext,
+			StudyScopeTransactionInput{ProfileRef: profileRef, Scope: scope},
+			func(store StudyStoreTransaction) error {
+				var operationErr error
+				result, operationErr = waiterOperation(tracingContext, store)
+				return operationErr
+			},
+		)
+		waiterOutcomes <- studySuccessorInsertOutcome{result: result, err: err}
+	}()
+	waitContext, cancelWait := context.WithTimeout(tracingContext, 10*time.Second)
+	waiterPID, waitErr := waitForStudySuccessorPostgresBlock(
+		waitContext,
+		observerPool,
+		waiterApplicationName,
+		holderPID,
+		waiterDone,
+	)
+	cancelWait()
+	if waitErr != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONTENTION.WAITER_NOT_BLOCKED", waitErr))
+	}
+	if waiterPID == 0 || waiterPID == holderPID {
+		t.Fatal("STUDY_SUCCESSOR.CONTENTION.BACKEND_IDENTITIES_COLLAPSED")
+	}
+
+	release()
+	if err := waitForStudySuccessorWorker(tracingContext, holderDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONTENTION.HOLDER_JOIN_FAILED", err))
+	}
+	if err := waitForStudySuccessorWorker(tracingContext, waiterDone); err != nil {
+		t.Fatal(studyTestDatabaseError("STUDY_SUCCESSOR.CONTENTION.WAITER_JOIN_FAILED", err))
+	}
+	return [2]studySuccessorInsertOutcome{<-holderOutcomes, <-waiterOutcomes}
+}
+
+func waitForStudySuccessorPostgresBlock(
+	ctx context.Context,
+	observerPool *pgxpool.Pool,
+	applicationName string,
+	blockerPID int32,
+	workerDone <-chan struct{},
+) (int32, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-workerDone:
+			return 0, errors.New("STUDY_SUCCESSOR.WORKER_COMPLETED_BEFORE_LOCK_OBSERVATION")
+		default:
+		}
+		var waiterPID int32
+		if err := observerPool.QueryRow(ctx, `
+			SELECT COALESCE((
+				SELECT pid
+				FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND application_name = $1
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+				  AND $2 = ANY(pg_blocking_pids(pid))
+				ORDER BY pid
+				LIMIT 1
+			), 0)`, applicationName, blockerPID).Scan(&waiterPID); err != nil {
+			return 0, err
+		}
+		if waiterPID != 0 {
+			return waiterPID, nil
+		}
+		select {
+		case <-workerDone:
+			return 0, errors.New("STUDY_SUCCESSOR.WORKER_COMPLETED_BEFORE_LOCK_OBSERVATION")
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForStudySuccessorWorker(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForStudySuccessorWorkerCleanup(t *testing.T, done <-chan struct{}, failure string) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		t.Error(failure)
 	}
 }
 

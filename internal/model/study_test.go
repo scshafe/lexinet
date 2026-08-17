@@ -226,6 +226,23 @@ func TestStudyReceiptJSONOmitsInternalPrincipalAndOwnership(t *testing.T) {
 			t.Fatalf("event receipt exposed internal ownership/batch value %q: %s", forbidden, eventEncoded)
 		}
 	}
+
+	requestFirst := int64(17)
+	requestLast := int64(23)
+	flushEncoded, err := json.Marshal(StudyFlushReceipt{
+		StudyPrincipalID:           OperatorStudyPrincipalID(),
+		LearnerProfileID:           uuid.MustParse("88888888-8888-4888-8888-888888888888"),
+		RequestFirstClientSequence: &requestFirst,
+		RequestLastClientSequence:  &requestLast,
+	})
+	if err != nil {
+		t.Fatalf("marshal flush receipt: %v", err)
+	}
+	for _, forbidden := range []string{"operator", "88888888-8888-4888-8888-888888888888", "request_first", "request_last", "17", "23"} {
+		if strings.Contains(string(flushEncoded), forbidden) {
+			t.Fatalf("flush receipt exposed internal ownership/request-window value %q: %s", forbidden, flushEncoded)
+		}
+	}
 }
 
 func TestStudySchemaErrorRedactsInvalidReferenceCanary(t *testing.T) {

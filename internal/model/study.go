@@ -579,6 +579,8 @@ type StudyFlushReceipt struct {
 	NormalizedSyncRequestSHA256 string           `json:"-"`
 	StudySessionID              uuid.UUID        `json:"session_id"`
 	ClientStreamID              uuid.UUID        `json:"client_stream_id"`
+	RequestFirstClientSequence  *int64           `json:"-"`
+	RequestLastClientSequence   *int64           `json:"-"`
 	FirstClientSequence         *int64           `json:"-"`
 	LastClientSequence          *int64           `json:"-"`
 	AcknowledgedThroughSequence int64            `json:"acknowledged_through_sequence"`

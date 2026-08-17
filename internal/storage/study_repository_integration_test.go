@@ -119,10 +119,11 @@ func testStudyReceiptClaimPersistence(
 			INSERT INTO study_flush_receipts (
 				study_flush_receipt_id, study_principal_id, learner_profile_id,
 				sync_request_id, normalized_sync_request_sha256, study_session_id,
-				client_stream_id, first_client_sequence, last_client_sequence,
+				client_stream_id, request_first_client_sequence, request_last_client_sequence,
+				first_client_sequence, last_client_sequence,
 				acknowledged_through_client_sequence, profile_ingestion_high_water,
 				study_session_state_version
-			) VALUES ($1,'operator',$2,$3,$4,$5,$6,$7,$8,$8,$9,$10)`,
+			) VALUES ($1,'operator',$2,$3,$4,$5,$6,$7,$8,$7,$8,$8,$9,$10)`,
 			originID, profileID, uuid.New(), model.SHA256Hex([]byte(originID.String())), root.Session.ID,
 			streamID, firstSequence, lastSequence, profileHighWater, root.Session.StateVersion); err != nil {
 			return err

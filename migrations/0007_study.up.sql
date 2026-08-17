@@ -791,7 +791,7 @@ COMMENT ON COLUMN study_event_receipts.source_content_sha256 IS 'Untrusted submi
 COMMENT ON COLUMN study_event_receipts.client_event_id IS 'Submitted event UUID, including rejected and semantic-duplicate inputs.';
 COMMENT ON COLUMN study_event_receipts.bound_event_payload_sha256 IS 'First-seen global UUID binding used to identify changed-input conflicts.';
 COMMENT ON COLUMN study_event_receipts.normalized_event_payload_sha256 IS 'Canonical payload digest bound to this sequence.';
-COMMENT ON COLUMN study_event_receipts.event_id_binding_matches_input IS 'Stored result of comparing the entire current input tuple with the immutable first-seen UUID binding.';
+COMMENT ON COLUMN study_event_receipts.event_id_binding_matches_input IS 'Stored result of comparing the current semantic event tuple, including numeric client sequence but excluding the current transport stream, with the immutable first-seen UUID binding; first_client_stream_id remains provenance only.';
 COMMENT ON COLUMN study_event_receipts.event_receipt_disposition IS 'Accepted fact, semantic duplicate, or stable terminal rejection.';
 COMMENT ON COLUMN study_event_receipts.event_receipt_code IS 'Stable study.v1 adjudication code.';
 COMMENT ON COLUMN study_event_receipts.terminal_failure_client_sequence IS 'Causative rejected sequence in the same originating sync batch; self for the cause and either earlier or later for collateral suffix inputs.';
@@ -841,6 +841,8 @@ CREATE TABLE study_flush_receipts (
     normalized_sync_request_sha256 TEXT NOT NULL,
     study_session_id UUID NOT NULL,
     client_stream_id UUID NOT NULL,
+    request_first_client_sequence BIGINT,
+    request_last_client_sequence BIGINT,
     first_client_sequence BIGINT,
     last_client_sequence BIGINT,
     acknowledged_through_client_sequence BIGINT NOT NULL,
@@ -862,6 +864,16 @@ CREATE TABLE study_flush_receipts (
         )
     ),
     CONSTRAINT study_flush_receipts_sha256_format CHECK (normalized_sync_request_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT study_flush_receipts_request_range_consistent CHECK (
+        (request_first_client_sequence IS NULL AND request_last_client_sequence IS NULL)
+        OR (
+            request_first_client_sequence IS NOT NULL
+            AND request_last_client_sequence IS NOT NULL
+            AND request_first_client_sequence >= 1
+            AND request_last_client_sequence >= request_first_client_sequence
+            AND request_last_client_sequence - request_first_client_sequence + 1 <= 64
+        )
+    ),
     CONSTRAINT study_flush_receipts_range_consistent CHECK (
         (first_client_sequence IS NULL AND last_client_sequence IS NULL)
         OR (
@@ -872,6 +884,19 @@ CREATE TABLE study_flush_receipts (
             AND last_client_sequence - first_client_sequence + 1 <= 64
             AND acknowledged_through_client_sequence = last_client_sequence
         )
+    ),
+    CONSTRAINT study_flush_receipts_suffix_within_request CHECK (
+        (first_client_sequence IS NULL AND last_client_sequence IS NULL)
+        OR (
+            request_first_client_sequence IS NOT NULL
+            AND request_last_client_sequence IS NOT NULL
+            AND first_client_sequence >= request_first_client_sequence
+            AND last_client_sequence <= request_last_client_sequence
+        )
+    ),
+    CONSTRAINT study_flush_receipts_request_is_adjudicated CHECK (
+        request_last_client_sequence IS NULL
+        OR request_last_client_sequence <= acknowledged_through_client_sequence
     ),
     CONSTRAINT study_flush_receipts_ack_nonnegative CHECK (acknowledged_through_client_sequence >= 0),
     CONSTRAINT study_flush_receipts_high_water_nonnegative CHECK (profile_ingestion_high_water >= 0),
@@ -893,6 +918,8 @@ COMMENT ON COLUMN study_flush_receipts.sync_request_id IS 'Client-generated sync
 COMMENT ON COLUMN study_flush_receipts.normalized_sync_request_sha256 IS 'Digest that makes changed-input sync UUID reuse an explicit conflict.';
 COMMENT ON COLUMN study_flush_receipts.study_session_id IS 'Session whose retained suffix was adjudicated.';
 COMMENT ON COLUMN study_flush_receipts.client_stream_id IS 'Durable stream advanced or observed by this sync.';
+COMMENT ON COLUMN study_flush_receipts.request_first_client_sequence IS 'First event sequence in the immutable normalized request window; null only for an empty event array.';
+COMMENT ON COLUMN study_flush_receipts.request_last_client_sequence IS 'Last event sequence in the immutable normalized request window; null only for an empty event array.';
 COMMENT ON COLUMN study_flush_receipts.first_client_sequence IS 'First newly adjudicated suffix sequence originated by this flush receipt; null when the sync added no suffix.';
 COMMENT ON COLUMN study_flush_receipts.last_client_sequence IS 'Last newly adjudicated suffix sequence originated by this flush receipt; null when the sync added no suffix.';
 COMMENT ON COLUMN study_flush_receipts.acknowledged_through_client_sequence IS 'Contiguous stream high-water after adjudication.';
