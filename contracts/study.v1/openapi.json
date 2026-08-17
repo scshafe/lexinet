@@ -1,0 +1,1535 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Lexinet study API",
+    "version": "study.v1",
+    "description": "Canonical machine-readable contract for resumable Lexinet study sessions.",
+    "x-contract-id": "study.v1",
+    "x-schema-version": 1
+  },
+  "servers": [
+    {
+      "url": "https://{lexinet_host}",
+      "variables": {
+        "lexinet_host": {
+          "default": "lexinet.invalid",
+          "description": "Explicitly configured certificate-validated Lexinet endpoint."
+        }
+      }
+    }
+  ],
+  "x-lexinet-contract": {
+    "canonical": "study.v1",
+    "response_style": "raw_success_resource",
+    "error_style": "existing_error_envelope",
+    "compatibility": {
+      "optional_response_fields_may_be_added": true,
+      "unknown_request_fields_rejected": true,
+      "new_required_field_requires_new_protocol": true,
+      "new_required_semantic_requires_new_protocol": true,
+      "semantic_change_requires_new_protocol": true
+    },
+    "bounds": {
+      "request_body_bytes_max": 262144,
+      "response_body_bytes_max": 1048576,
+      "topic_refs_max": 32,
+      "events_per_sync_max": 64,
+      "items_per_page_max": 64,
+      "profile_ref_codepoints_max": 128,
+      "topic_ref_codepoints_max": 128,
+      "front_codepoints_max": 512,
+      "back_codepoints_max": 16384,
+      "example_codepoints_max": 16384
+    },
+    "required_semantics": [
+      "active_scope_create_or_resume",
+      "immutable_complete_card_projection",
+      "scheduler_provenance",
+      "singular_presented_revealed",
+      "append_only_rated_rating_voided",
+      "durable_client_stream_terminal_receipts",
+      "server_authoritative_cycle_exhaustion",
+      "atomic_predecessor_successor_linking",
+      "predecessor_flush_receipt_barrier",
+      "waiting_for_corpus_convergence",
+      "normalized_hash_idempotency",
+      "late_completed_predecessor_correction"
+    ],
+    "transition_order": [
+      "presented",
+      "revealed",
+      "rated",
+      "rating_voided"
+    ],
+    "idempotency": {
+      "create_key_field": "creation_request_id",
+      "sync_key_field": "sync_id",
+      "normalized_hash_algorithm": "sha256",
+      "key_scope": "authorized_principal_and_session_or_active_scope",
+      "changed_input_code": "IDEMPOTENCY_CONFLICT"
+    },
+    "stable_error_codes": [
+      "STUDY_SCHEMA_INVALID",
+      "UNAUTHORIZED",
+      "STUDY_AUTHORIZATION_DENIED",
+      "STUDY_PROFILE_NOT_FOUND",
+      "STUDY_SESSION_NOT_FOUND",
+      "IDEMPOTENCY_CONFLICT",
+      "STUDY_CYCLE_NOT_EXHAUSTED",
+      "STUDY_FLUSH_RECEIPT_REQUIRED",
+      "STUDY_FLUSH_RECEIPT_STALE",
+      "STUDY_STATE_STALE",
+      "STUDY_STREAM_SEQUENCE_GAP",
+      "STUDY_REQUEST_TOO_LARGE",
+      "STUDY_RATE_LIMITED",
+      "STUDY_SERVICE_UNAVAILABLE",
+      "INTERNAL"
+    ],
+    "stable_receipt_codes": [
+      "STUDY_EVENT_ACCEPTED",
+      "STUDY_EVENT_SEMANTIC_DUPLICATE",
+      "STUDY_EVENT_TRANSITION_INVALID",
+      "STUDY_EVENT_ID_CONFLICT",
+      "STUDY_RATING_ALREADY_EFFECTIVE",
+      "STUDY_RATING_VOID_TARGET_INVALID",
+      "STUDY_CONTENT_REVISION_MISMATCH"
+    ]
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/study/sessions": {
+      "post": {
+        "operationId": "createOrResumeStudySession",
+        "summary": "Create or resume one authoritative session for an active scope",
+        "description": "Distinct creation UUIDs for one active scope converge. A predecessor requires a valid flush receipt and server-authoritative exhaustion.",
+        "x-idempotency-key-field": "creation_request_id",
+        "x-normalized-request-hash": "sha256",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestCorrelationId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing active, waiting, or linked successor session",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/ResponseCorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CreateSessionResource"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New active or waiting-for-corpus session",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/ResponseCorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CreateSessionResource"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "401": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "403": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "404": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "409": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "413": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "429": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "500": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StudyError"
+          }
+        }
+      }
+    },
+    "/api/v1/study/sessions/{session_id}": {
+      "get": {
+        "operationId": "getStudySession",
+        "summary": "Resume an issued session and fetch a bounded immutable page",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/PageAfterPosition"
+          },
+          {
+            "$ref": "#/components/parameters/PageLimit"
+          },
+          {
+            "$ref": "#/components/parameters/RequestCorrelationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The exact issued session resource and requested page",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/ResponseCorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResource"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "401": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "403": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "404": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "429": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "500": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StudyError"
+          }
+        }
+      }
+    },
+    "/api/v1/study/sessions/{session_id}/sync": {
+      "post": {
+        "operationId": "syncStudySession",
+        "summary": "Atomically adjudicate a contiguous client-stream batch",
+        "description": "Accepted, semantic-duplicate, and stable terminally rejected sequences receive durable receipts. Retryable request failures adjudicate no new sequence.",
+        "x-idempotency-key-field": "sync_id",
+        "x-normalized-request-hash": "sha256",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/RequestCorrelationId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Terminal receipts, flush barrier, and an immutable issued page",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/ResponseCorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResource"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "401": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "403": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "404": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "409": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "413": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "429": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "500": {
+            "$ref": "#/components/responses/StudyError"
+          },
+          "503": {
+            "$ref": "#/components/responses/StudyError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Operator or scoped fallback bearer. Final panel authorization remains a separately verified Tailnet-principal boundary."
+      }
+    },
+    "parameters": {
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
+      "PageAfterPosition": {
+        "name": "page_after_position",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 2147483647,
+          "default": -1
+        }
+      },
+      "PageLimit": {
+        "name": "page_limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 16
+        }
+      },
+      "RequestCorrelationId": {
+        "name": "X-Request-ID",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "headers": {
+      "ResponseCorrelationId": {
+        "required": true,
+        "description": "Server correlation identity for the request.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "RetryAfter": {
+        "description": "Optional bounded HTTP Retry-After value on a retryable response.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "responses": {
+      "StudyError": {
+        "description": "Stable Lexinet error envelope",
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/ResponseCorrelationId"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ProtocolVersion": {
+        "type": "string",
+        "const": "study.v1"
+      },
+      "SchemaVersion": {
+        "type": "integer",
+        "const": 1
+      },
+      "RequiredSemantics": {
+        "type": "array",
+        "minItems": 12,
+        "maxItems": 12,
+        "prefixItems": [
+          {
+            "const": "active_scope_create_or_resume"
+          },
+          {
+            "const": "immutable_complete_card_projection"
+          },
+          {
+            "const": "scheduler_provenance"
+          },
+          {
+            "const": "singular_presented_revealed"
+          },
+          {
+            "const": "append_only_rated_rating_voided"
+          },
+          {
+            "const": "durable_client_stream_terminal_receipts"
+          },
+          {
+            "const": "server_authoritative_cycle_exhaustion"
+          },
+          {
+            "const": "atomic_predecessor_successor_linking"
+          },
+          {
+            "const": "predecessor_flush_receipt_barrier"
+          },
+          {
+            "const": "waiting_for_corpus_convergence"
+          },
+          {
+            "const": "normalized_hash_idempotency"
+          },
+          {
+            "const": "late_completed_predecessor_correction"
+          }
+        ],
+        "items": false
+      },
+      "Uuid": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "NullableUuid": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "ProfileRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+      },
+      "TopicRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+      },
+      "StudyScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "topic_refs",
+          "card_kind"
+        ],
+        "properties": {
+          "topic_refs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/TopicRef"
+            },
+            "description": "Normalized lexicographically sorted topic references whose union defines the corpus."
+          },
+          "card_kind": {
+            "type": "string",
+            "const": "idea"
+          }
+        }
+      },
+      "PageRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "after_position",
+          "limit"
+        ],
+        "properties": {
+          "after_position": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 2147483647
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          }
+        }
+      },
+      "PredecessorBarrier": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "flush_receipt_id"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "flush_receipt_id": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "schema_version",
+          "creation_request_id",
+          "profile_ref",
+          "scope",
+          "page"
+        ],
+        "properties": {
+          "protocol_version": {
+            "$ref": "#/components/schemas/ProtocolVersion"
+          },
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "creation_request_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "profile_ref": {
+            "$ref": "#/components/schemas/ProfileRef"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/StudyScope"
+          },
+          "predecessor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PredecessorBarrier"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageRequest"
+          }
+        }
+      },
+      "CreationReceipt": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "creation_request_id",
+          "normalized_request_sha256",
+          "disposition",
+          "canonical_session_id"
+        ],
+        "properties": {
+          "creation_request_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "normalized_request_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "created",
+              "resumed",
+              "converged_to_existing",
+              "replayed",
+              "successor"
+            ]
+          },
+          "canonical_session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        }
+      },
+      "SchedulerProvenance": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "name",
+          "version",
+          "configuration_sha256",
+          "input_profile_ingestion_high_water",
+          "planned_at",
+          "seed"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "configuration_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "input_profile_ingestion_high_water": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "planned_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "seed": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "SourceRevision": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "source_kind",
+          "source_identity",
+          "content_revision",
+          "content_sha256"
+        ],
+        "properties": {
+          "source_kind": {
+            "type": "string",
+            "const": "idea"
+          },
+          "source_identity": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "content_revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "content_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        }
+      },
+      "CardFront": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "canonical_name"
+        ],
+        "properties": {
+          "canonical_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "CardBack": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "definition",
+          "example"
+        ],
+        "properties": {
+          "definition": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "example": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SelectionReason": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "rating_rank",
+          "latest_presented_ingestion_ordinal",
+          "tie_breaker_sha256",
+          "boundary_adjustment"
+        ],
+        "properties": {
+          "rating_rank": {
+            "type": "string",
+            "enum": [
+              "again",
+              "hard",
+              "unseen_or_unrated",
+              "good",
+              "easy"
+            ]
+          },
+          "latest_presented_ingestion_ordinal": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tie_breaker_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "boundary_adjustment": {
+            "type": "string",
+            "enum": [
+              "none",
+              "boundary_repeat_rotated",
+              "boundary_repeat_due_to_priority"
+            ]
+          }
+        }
+      },
+      "CardProjection": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "session_item_id",
+          "position",
+          "card_kind",
+          "card_identity",
+          "live_source_idea_id",
+          "source_revision",
+          "front",
+          "back",
+          "selection_reason"
+        ],
+        "properties": {
+          "session_item_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "card_kind": {
+            "type": "string",
+            "const": "idea"
+          },
+          "card_identity": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "live_source_idea_id": {
+            "$ref": "#/components/schemas/NullableUuid"
+          },
+          "source_revision": {
+            "$ref": "#/components/schemas/SourceRevision"
+          },
+          "front": {
+            "$ref": "#/components/schemas/CardFront"
+          },
+          "back": {
+            "$ref": "#/components/schemas/CardBack"
+          },
+          "selection_reason": {
+            "$ref": "#/components/schemas/SelectionReason"
+          }
+        }
+      },
+      "SessionPage": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "after_position",
+          "next_after_position",
+          "complete",
+          "items"
+        ],
+        "properties": {
+          "after_position": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 2147483647
+          },
+          "next_after_position": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 2147483647
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/CardProjection"
+            }
+          }
+        }
+      },
+      "SessionResource": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "protocol_version",
+          "schema_version",
+          "required_semantics",
+          "session_id",
+          "profile_ref",
+          "scope",
+          "lifecycle",
+          "creation_receipt",
+          "predecessor_session_id",
+          "successor_session_id",
+          "corpus_sha256",
+          "profile_ingestion_high_water",
+          "state_version",
+          "scheduler",
+          "page",
+          "generated_at"
+        ],
+        "properties": {
+          "protocol_version": {
+            "$ref": "#/components/schemas/ProtocolVersion"
+          },
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "required_semantics": {
+            "$ref": "#/components/schemas/RequiredSemantics"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "profile_ref": {
+            "$ref": "#/components/schemas/ProfileRef"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/StudyScope"
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "active",
+              "completed",
+              "waiting_for_corpus",
+              "superseded_empty",
+              "abandoned"
+            ]
+          },
+          "creation_receipt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CreationReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "predecessor_session_id": {
+            "$ref": "#/components/schemas/NullableUuid"
+          },
+          "successor_session_id": {
+            "$ref": "#/components/schemas/NullableUuid"
+          },
+          "corpus_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "profile_ingestion_high_water": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "scheduler": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SchedulerProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "page": {
+            "$ref": "#/components/schemas/SessionPage"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "lifecycle": {
+                  "const": "waiting_for_corpus"
+                }
+              },
+              "required": [
+                "lifecycle"
+              ]
+            },
+            "then": {
+              "properties": {
+                "scheduler": {
+                  "type": "null"
+                },
+                "page": {
+                  "properties": {
+                    "complete": {
+                      "const": true
+                    },
+                    "items": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "lifecycle": {
+                  "const": "active"
+                }
+              },
+              "required": [
+                "lifecycle"
+              ]
+            },
+            "then": {
+              "properties": {
+                "scheduler": {
+                  "$ref": "#/components/schemas/SchedulerProvenance"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "CreateSessionResource": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SessionResource"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "creation_receipt": {
+                "$ref": "#/components/schemas/CreationReceipt"
+              }
+            }
+          }
+        ]
+      },
+      "EventCommon": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "client_sequence",
+          "profile_ref",
+          "session_item_id",
+          "card_identity",
+          "content_sha256",
+          "client_clock_quality"
+        ],
+        "properties": {
+          "event_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "client_sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "profile_ref": {
+            "$ref": "#/components/schemas/ProfileRef"
+          },
+          "session_item_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "card_identity": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "content_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "client_observed_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "client_clock_quality": {
+            "type": "string",
+            "enum": [
+              "trusted",
+              "bounded_uncertain",
+              "unknown"
+            ]
+          }
+        }
+      },
+      "PresentedEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "presented"
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "RevealedEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "revealed"
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "RatedEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "rating"
+            ],
+            "properties": {
+              "kind": {
+                "const": "rated"
+              },
+              "rating": {
+                "type": "string",
+                "enum": [
+                  "again",
+                  "hard",
+                  "good",
+                  "easy"
+                ]
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "RatingVoidedEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "rating_event_id"
+            ],
+            "properties": {
+              "kind": {
+                "const": "rating_voided"
+              },
+              "rating_event_id": {
+                "$ref": "#/components/schemas/Uuid"
+              }
+            }
+          }
+        ],
+        "unevaluatedProperties": false
+      },
+      "StudyEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PresentedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RevealedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RatingVoidedEvent"
+          }
+        ]
+      },
+      "SyncRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "schema_version",
+          "sync_id",
+          "client_stream_id",
+          "expected_state_version",
+          "events",
+          "page"
+        ],
+        "properties": {
+          "protocol_version": {
+            "$ref": "#/components/schemas/ProtocolVersion"
+          },
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "sync_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "client_stream_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "expected_state_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "events": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/StudyEvent"
+            },
+            "description": "Strictly ordered, contiguous client_sequence values for this durable stream."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageRequest"
+          }
+        }
+      },
+      "EventReceipt": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "One immutable terminal adjudication. Accepted receipts identify their new canonical fact; semantic duplicates identify the existing fact; terminal rejections identify no scheduler fact.",
+        "required": [
+          "client_sequence",
+          "event_id",
+          "payload_sha256",
+          "disposition",
+          "code",
+          "canonical_event_id",
+          "profile_ingestion_ordinal"
+        ],
+        "properties": {
+          "client_sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "semantic_duplicate",
+              "terminal_rejected"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "STUDY_EVENT_ACCEPTED",
+              "STUDY_EVENT_SEMANTIC_DUPLICATE",
+              "STUDY_EVENT_TRANSITION_INVALID",
+              "STUDY_EVENT_ID_CONFLICT",
+              "STUDY_RATING_ALREADY_EFFECTIVE",
+              "STUDY_RATING_VOID_TARGET_INVALID",
+              "STUDY_CONTENT_REVISION_MISMATCH"
+            ]
+          },
+          "canonical_event_id": {
+            "$ref": "#/components/schemas/NullableUuid"
+          },
+          "profile_ingestion_ordinal": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "disposition": {
+                  "const": "accepted"
+                }
+              },
+              "required": [
+                "disposition"
+              ]
+            },
+            "then": {
+              "properties": {
+                "code": {
+                  "const": "STUDY_EVENT_ACCEPTED"
+                },
+                "canonical_event_id": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "profile_ingestion_ordinal": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "disposition": {
+                  "const": "semantic_duplicate"
+                }
+              },
+              "required": [
+                "disposition"
+              ]
+            },
+            "then": {
+              "properties": {
+                "code": {
+                  "const": "STUDY_EVENT_SEMANTIC_DUPLICATE"
+                },
+                "canonical_event_id": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "profile_ingestion_ordinal": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "disposition": {
+                  "const": "terminal_rejected"
+                }
+              },
+              "required": [
+                "disposition"
+              ]
+            },
+            "then": {
+              "properties": {
+                "code": {
+                  "enum": [
+                    "STUDY_EVENT_TRANSITION_INVALID",
+                    "STUDY_EVENT_ID_CONFLICT",
+                    "STUDY_RATING_ALREADY_EFFECTIVE",
+                    "STUDY_RATING_VOID_TARGET_INVALID",
+                    "STUDY_CONTENT_REVISION_MISMATCH"
+                  ]
+                },
+                "canonical_event_id": {
+                  "type": "null"
+                },
+                "profile_ingestion_ordinal": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "FlushReceipt": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "receipt_id",
+          "session_id",
+          "sync_id",
+          "client_stream_id",
+          "acknowledged_through_sequence",
+          "profile_ingestion_high_water",
+          "state_version",
+          "issued_at"
+        ],
+        "properties": {
+          "receipt_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "sync_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "client_stream_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "acknowledged_through_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "profile_ingestion_high_water": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SyncResource": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "protocol_version",
+          "schema_version",
+          "required_semantics",
+          "sync_id",
+          "normalized_request_sha256",
+          "client_stream_id",
+          "adjudicated_through_sequence",
+          "profile_ingestion_high_water",
+          "receipts",
+          "flush_receipt",
+          "session",
+          "generated_at"
+        ],
+        "properties": {
+          "protocol_version": {
+            "$ref": "#/components/schemas/ProtocolVersion"
+          },
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "required_semantics": {
+            "$ref": "#/components/schemas/RequiredSemantics"
+          },
+          "sync_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "normalized_request_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "client_stream_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "adjudicated_through_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "profile_ingestion_high_water": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "receipts": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/EventReceipt"
+            }
+          },
+          "flush_receipt": {
+            "$ref": "#/components/schemas/FlushReceipt"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionResource"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ErrorObject": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "protocol_version",
+          "schema_version",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "protocol_version": {
+            "$ref": "#/components/schemas/ProtocolVersion"
+          },
+          "schema_version": {
+            "$ref": "#/components/schemas/SchemaVersion"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "STUDY_SCHEMA_INVALID",
+              "UNAUTHORIZED",
+              "STUDY_AUTHORIZATION_DENIED",
+              "STUDY_PROFILE_NOT_FOUND",
+              "STUDY_SESSION_NOT_FOUND",
+              "IDEMPOTENCY_CONFLICT",
+              "STUDY_CYCLE_NOT_EXHAUSTED",
+              "STUDY_FLUSH_RECEIPT_REQUIRED",
+              "STUDY_FLUSH_RECEIPT_STALE",
+              "STUDY_STATE_STALE",
+              "STUDY_STREAM_SEQUENCE_GAP",
+              "STUDY_REQUEST_TOO_LARGE",
+              "STUDY_RATE_LIMITED",
+              "STUDY_SERVICE_UNAVAILABLE",
+              "INTERNAL"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorObject"
+          }
+        }
+      }
+    }
+  }
+}

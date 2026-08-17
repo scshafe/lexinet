@@ -1,0 +1,57 @@
+{
+  "manifest_version": 1,
+  "contract_id": "study.v1",
+  "schema_version": 1,
+  "openapi_path": "openapi.json",
+  "required_semantics": [
+    "active_scope_create_or_resume",
+    "immutable_complete_card_projection",
+    "scheduler_provenance",
+    "singular_presented_revealed",
+    "append_only_rated_rating_voided",
+    "durable_client_stream_terminal_receipts",
+    "server_authoritative_cycle_exhaustion",
+    "atomic_predecessor_successor_linking",
+    "predecessor_flush_receipt_barrier",
+    "waiting_for_corpus_convergence",
+    "normalized_hash_idempotency",
+    "late_completed_predecessor_correction"
+  ],
+  "examples": [
+    {
+      "path": "examples/session-created.json",
+      "schema": "CreateSessionResource",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/session-active-page-exhausted.json",
+      "schema": "SessionResource",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/session-waiting-for-corpus.json",
+      "schema": "CreateSessionResource",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/sync-rated-and-voided.json",
+      "schema": "SyncResource",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/error-cycle-not-exhausted.json",
+      "schema": "ErrorEnvelope",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/error-idempotency-conflict.json",
+      "schema": "ErrorEnvelope",
+      "expected": "valid"
+    },
+    {
+      "path": "examples/invalid/session-unknown-required-semantic.json",
+      "schema": "SessionResource",
+      "expected": "invalid"
+    }
+  ]
+}
