@@ -942,7 +942,7 @@ func requireDestructiveConfirmation(yes bool, message string) error {
 	if yes || stdinIsTerminal() {
 		return nil
 	}
-	return usageError(message)
+	return usageError("%s", message)
 }
 
 func usageError(format string, args ...any) error {
@@ -1043,7 +1043,7 @@ func normalizeCompleteSubmissionInput(input model.CompleteSubmissionInput) (mode
 
 func submissionUsageError(err error) error {
 	if errors.Is(err, model.ErrSubmissionTermRequired) || errors.Is(err, model.ErrSubmissionIdeaRequired) {
-		return usageError(err.Error())
+		return usageError("%s", err.Error())
 	}
 	return err
 }
