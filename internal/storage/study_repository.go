@@ -39,6 +39,7 @@ type StudyStoreTransaction interface {
 	GetProjection(context.Context, StudyProjectionKey) (*model.StudySchedulerCardProjection, error)
 	ReplaceProjection(context.Context, model.StudySchedulerCardProjection, int64) (*model.StudySchedulerCardProjection, error)
 	InsertPlanOnce(context.Context, StudyPlanInsert) (*StudyPlanInsertResult, error)
+	InsertSuccessorPlanOnce(context.Context, StudySuccessorPlanInsert) (*StudyPlanInsertResult, error)
 	TransitionSession(context.Context, StudySessionTransition) (*model.StudySession, error)
 }
 
