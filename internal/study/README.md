@@ -35,6 +35,25 @@ and output-validation boundary. Direct extension calls may be useful in tests
 and shadow evaluation, but their output must never be written as an issued
 cycle without that materializer validation.
 
+`CycleMaterializer` is the `@canonical study_cycle_materializer`. It owns the
+storage-neutral composition of one locked eligible corpus, accepted-prefix
+projection rebuild, merge resolution, predecessor boundary, canonical plan,
+frozen item bytes, and root/successor persistence proposal. It validates the
+configured `variety_first_v1` plan independently before persistence. Durable
+creation receipts are resolved before mutable corpus, projection, redirect,
+or scheduler reads; replay returns the issued plan without inventing a
+historical scheduling snapshot. Empty locked corpora skip prefix rebuild and
+scheduling and persist or converge a `waiting_for_corpus` sentinel. Card,
+accepted-prefix, digest, and shadow payload bounds fail with structured errors
+before unbounded work.
+
+The storage package's `Repository.MaterializeStudyCycle` is the production
+transaction wrapper. It exposes no staged result until commit succeeds.
+`StudyShadowRunner` is a post-commit-only, non-authoritative evaluation seam:
+it receives private snapshot/plan copies and has no store, callback, or plan
+write capability. Callers may invoke it only for a newly created result whose
+exact scheduling snapshot is available after an independent committed read.
+
 ## Boundary behavior
 
 When the merge-canonicalized predecessor tail would be the new head,
@@ -55,9 +74,7 @@ A future scheduler must:
 5. be injected explicitly by the composition root—there is no ambient policy
    registry or silent fallback.
 
-Canonical event projection/rebuild is implemented in adjacent pure files as a
-separate Step 3 slice. The remaining Step 3 slices are intentionally pending
-outside this core: transactional source-to-card materialization, composition
-and successor orchestration, and the authority-isolated shadow runner. Those
-layers may consume this package but must not add storage or time authority to
-the scheduler.
+Canonical event projection/rebuild, transactional materialization composition,
+and the authority-isolated shadow runner are implemented in adjacent files.
+They do not add database, clock, UUID, seed, or ambient configuration authority
+to the scheduler. API/service routing remains outside this package.

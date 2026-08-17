@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"lexinet/internal/model"
+	"lexinet/internal/study"
 	studydigest "lexinet/internal/study/digest"
 )
 
@@ -30,6 +31,7 @@ type StudyStoreTransaction interface {
 	Profile() model.StudyLearnerProfile
 	Scope() model.StudyNormalizedScope
 	NonterminalSession() *model.StudySession
+	ResolveExistingCycle(context.Context, StudyExistingCycleResolutionInput) (*StudyExistingCycleResolution, error)
 	CapturedEligibleCorpusSHA256() (string, error)
 	GetSession(context.Context, uuid.UUID) (*model.StudySession, error)
 	FindSuccessor(context.Context, uuid.UUID) (*model.StudySession, error)
@@ -76,6 +78,29 @@ type StudyPlanInsertResult struct {
 	Items   []model.StudySessionItem
 	Receipt model.StudyCreationReceipt
 	Created bool
+}
+
+// StudyExistingCycleResolutionInput is the stable creation identity that may
+// be resolved before any mutable corpus or projection state is read.
+type StudyExistingCycleResolutionInput struct {
+	Principal               model.StudyPrincipalID
+	CreationRequestID       uuid.UUID
+	NormalizedRequestSHA256 string
+	PredecessorSessionID    *uuid.UUID
+}
+
+// StudyExistingCycleResolution carries the durable plan authority plus the
+// one storage-proven fact that cannot be inferred from receipt bytes alone:
+// a nil-predecessor request created the successor while atomically replacing
+// a superseded-empty waiting sentinel.
+type StudyExistingCycleResolution struct {
+	Plan                       StudyPlanInsertResult
+	ImplicitWaitingReplacement *StudyWaitingReplacementEvidence
+}
+
+type StudyWaitingReplacementEvidence struct {
+	Predecessor model.StudySession
+	Items       []model.StudySessionItem
 }
 
 type StudySessionTransition struct {
@@ -228,6 +253,11 @@ func (repository *Repository) WithStudyScopeTransaction(
 	store := &studyStoreTx{tx: tx, profile: *profile, scope: normalizedScope, nonterminal: nonterminal}
 	if err := operation(store); err != nil {
 		return err
+	}
+	if repository.studyMaterializationBeforeCommit != nil {
+		if err := repository.studyMaterializationBeforeCommit(ctx, tx); err != nil {
+			return mapStudyStorageError("study_materialization_before_commit", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return mapStudyStorageError("study_transaction_commit", err)
@@ -554,6 +584,172 @@ func listStudySessionItems(ctx context.Context, runner dbRunner, sessionID uuid.
 		return nil, mapStudyStorageError("study_session_items_read", err)
 	}
 	return items, nil
+}
+
+func (store *studyStoreTx) ResolveExistingCycle(
+	ctx context.Context,
+	input StudyExistingCycleResolutionInput,
+) (*StudyExistingCycleResolution, error) {
+	if !input.Principal.Valid() || input.CreationRequestID == uuid.Nil || !model.IsStudySHA256(input.NormalizedRequestSHA256) ||
+		(input.PredecessorSessionID != nil && *input.PredecessorSessionID == uuid.Nil) {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study creation resolution identity is invalid", "study_creation_resolve", false, nil)
+	}
+	if input.PredecessorSessionID != nil {
+		predecessor, err := store.GetSession(ctx, *input.PredecessorSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if predecessor != nil && (predecessor.Lifecycle == model.StudySessionLifecycleWaitingForCorpus ||
+			predecessor.Lifecycle == model.StudySessionLifecycleSupersededEmpty) {
+			return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "waiting study sentinel cannot be named as an explicit successor predecessor", "study_creation_resolve", false, nil)
+		}
+	}
+	receipt, err := readStudyCreationReceipt(
+		ctx,
+		store.tx,
+		store.profile.ID,
+		store.scope,
+		input.Principal,
+		input.CreationRequestID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if receipt != nil {
+		if receipt.NormalizedRequestSHA256 != input.NormalizedRequestSHA256 {
+			return nil, newStudyStorageError(model.StudyErrorCodeIdempotencyConflict, "study creation request identity is already bound to different content", "study_creation_resolve", false, nil)
+		}
+		result, err := store.planInsertResult(ctx, *receipt, false)
+		if err != nil {
+			return nil, err
+		}
+		implicitWaitingReplacement, err := store.implicitWaitingReplacementEvidence(ctx, result.Session, result.Receipt, input.PredecessorSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if !validStudyMaterializationReceiptPredecessor(
+			result.Session,
+			result.Receipt,
+			input.PredecessorSessionID,
+			implicitWaitingReplacement != nil,
+		) {
+			return nil, newStudyStorageError(model.StudyErrorCodeIdempotencyConflict, "study creation request identity is already bound to different predecessor semantics", "study_creation_resolve", false, nil)
+		}
+		return &StudyExistingCycleResolution{Plan: *result, ImplicitWaitingReplacement: implicitWaitingReplacement}, nil
+	}
+
+	if input.PredecessorSessionID != nil {
+		successor, err := store.FindSuccessor(ctx, *input.PredecessorSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if successor == nil {
+			return nil, nil
+		}
+		if !sameStudyScope(successor.Scope, store.scope) {
+			return nil, newStudyStorageError(model.StudyErrorCodeSessionNotFound, "study successor was not found in the active scope", "study_creation_resolve", false, nil)
+		}
+		receipt, err := insertStudyCreationReceipt(
+			ctx,
+			store.tx,
+			store.profile.ID,
+			store.scope,
+			input.Principal,
+			input.CreationRequestID,
+			input.NormalizedRequestSHA256,
+			successor.ID,
+			model.StudyCreationDispositionSuccessor,
+		)
+		if err != nil {
+			return nil, err
+		}
+		result, err := store.planInsertResult(ctx, *receipt, false)
+		if err != nil {
+			return nil, err
+		}
+		return &StudyExistingCycleResolution{Plan: *result}, nil
+	}
+
+	if store.nonterminal == nil || store.nonterminal.Lifecycle == model.StudySessionLifecycleWaitingForCorpus {
+		// A waiting sentinel is deliberately unresolved: only a locked corpus
+		// capture can distinguish unchanged waiting from atomic replacement.
+		return nil, nil
+	}
+	if store.nonterminal.Lifecycle != model.StudySessionLifecycleActive {
+		return nil, newStudyStorageError(model.StudyErrorCodeInternal, "locked study nonterminal lifecycle is invalid", "study_creation_resolve", false, nil)
+	}
+	receipt, err = insertStudyCreationReceipt(
+		ctx,
+		store.tx,
+		store.profile.ID,
+		store.scope,
+		input.Principal,
+		input.CreationRequestID,
+		input.NormalizedRequestSHA256,
+		store.nonterminal.ID,
+		model.StudyCreationDispositionConvergedToExisting,
+	)
+	if err != nil {
+		return nil, err
+	}
+	result, err := store.planInsertResult(ctx, *receipt, false)
+	if err != nil {
+		return nil, err
+	}
+	return &StudyExistingCycleResolution{Plan: *result}, nil
+}
+
+func validStudyMaterializationReceiptPredecessor(
+	session model.StudySession,
+	receipt model.StudyCreationReceipt,
+	requested *uuid.UUID,
+	implicitWaitingReplacement bool,
+) bool {
+	switch receipt.Disposition {
+	case model.StudyCreationDispositionCreated:
+		return requested == nil && session.PredecessorStudySessionID == nil && !implicitWaitingReplacement
+	case model.StudyCreationDispositionConvergedToExisting:
+		return requested == nil && !implicitWaitingReplacement
+	case model.StudyCreationDispositionSuccessor:
+		if session.PredecessorStudySessionID == nil {
+			return false
+		}
+		if requested != nil {
+			return !implicitWaitingReplacement && *requested == *session.PredecessorStudySessionID
+		}
+		return implicitWaitingReplacement
+	default:
+		return false
+	}
+}
+
+func (store *studyStoreTx) implicitWaitingReplacementEvidence(
+	ctx context.Context,
+	session model.StudySession,
+	receipt model.StudyCreationReceipt,
+	requested *uuid.UUID,
+) (*StudyWaitingReplacementEvidence, error) {
+	if requested != nil || receipt.Disposition != model.StudyCreationDispositionSuccessor ||
+		session.PredecessorStudySessionID == nil {
+		return nil, nil
+	}
+	predecessor, err := store.GetSession(ctx, *session.PredecessorStudySessionID)
+	if err != nil {
+		return nil, err
+	}
+	if predecessor == nil {
+		return nil, newStudyStorageError(model.StudyErrorCodeInternal, "study waiting replacement predecessor is unavailable", "study_creation_resolve", false, nil)
+	}
+	if predecessor.Lifecycle != model.StudySessionLifecycleSupersededEmpty ||
+		predecessor.SuccessorStudySessionID == nil || *predecessor.SuccessorStudySessionID != session.ID ||
+		predecessor.LearnerProfileID != session.LearnerProfileID || !sameStudyScope(predecessor.Scope, session.Scope) {
+		return nil, nil
+	}
+	items, err := listStudySessionItems(ctx, store.tx, predecessor.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &StudyWaitingReplacementEvidence{Predecessor: *predecessor, Items: items}, nil
 }
 
 func (store *studyStoreTx) InsertPlanOnce(ctx context.Context, input StudyPlanInsert) (*StudyPlanInsertResult, error) {
@@ -1226,7 +1422,8 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 			OR (idea.summary IS NOT NULL AND btrim(idea.summary) <> '')
 		  )
 		ORDER BY idea.id
-		FOR UPDATE OF idea`, store.scope.Scope.TopicIDs)
+		LIMIT $2
+		FOR UPDATE OF idea`, store.scope.Scope.TopicIDs, study.StudyMaximumSchedulingCards+1)
 	if err != nil {
 		return nil, mapStudyStorageError("study_eligible_sources_lock", err)
 	}
@@ -1234,6 +1431,9 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 	identityRows.Close()
 	if err != nil {
 		return nil, mapStudyStorageError("study_eligible_sources_lock", err)
+	}
+	if len(ideaIDs) > study.StudyMaximumSchedulingCards {
+		return nil, newStudyStorageError(model.StudyErrorCodeRequestTooLarge, "study eligible corpus exceeds the materialization work bound", "study_eligible_sources_lock", false, nil)
 	}
 	store.eligibleSourcesCaptured = true
 	store.eligibleSources = make(map[uuid.UUID]StudyEligibleSource, len(ideaIDs))
@@ -1483,7 +1683,13 @@ func mapStudyDigestStorageError(operation string, err error) error {
 }
 
 func (store *studyStoreTx) ReadAcceptedPrefix(ctx context.Context, highWater int64) ([]model.StudyEvent, error) {
-	if highWater < 0 || highWater > store.profile.ProfileIngestionHighWater {
+	if highWater < 0 {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study prefix high-water is invalid", "study_accepted_prefix_read", false, nil)
+	}
+	if highWater > study.StudyProjectionAcceptedEventLimit {
+		return nil, newStudyStorageError(model.StudyErrorCodeRequestTooLarge, "study accepted prefix exceeds the materialization work bound", "study_accepted_prefix_read", false, nil)
+	}
+	if highWater > store.profile.ProfileIngestionHighWater {
 		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "study prefix high-water is invalid", "study_accepted_prefix_read", false, nil)
 	}
 	rows, err := store.tx.Query(ctx, `

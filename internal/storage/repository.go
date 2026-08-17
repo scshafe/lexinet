@@ -61,11 +61,12 @@ type dbPool interface {
 }
 
 type Repository struct {
-	db                       dbPool
-	searchStrategies         searchcfg.StrategyProvider
-	studyMergeBeforeLock     func(uuid.UUID, uuid.UUID, [2]uuid.UUID)
-	ideaMutationAfterResolve func(string, []uuid.UUID)
-	studyEventBeforeCommit   func(context.Context, pgx.Tx) error
+	db                               dbPool
+	searchStrategies                 searchcfg.StrategyProvider
+	studyMergeBeforeLock             func(uuid.UUID, uuid.UUID, [2]uuid.UUID)
+	ideaMutationAfterResolve         func(string, []uuid.UUID)
+	studyEventBeforeCommit           func(context.Context, pgx.Tx) error
+	studyMaterializationBeforeCommit func(context.Context, pgx.Tx) error
 }
 
 type RepositoryOption func(*Repository)
