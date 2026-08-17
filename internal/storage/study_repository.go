@@ -3,9 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -19,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"lexinet/internal/model"
+	studydigest "lexinet/internal/study/digest"
 )
 
 var studyReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
@@ -29,7 +28,9 @@ var studyReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 // escape the transaction that owns their lock order.
 type StudyStoreTransaction interface {
 	Profile() model.StudyLearnerProfile
+	Scope() model.StudyNormalizedScope
 	NonterminalSession() *model.StudySession
+	CapturedEligibleCorpusSHA256() (string, error)
 	GetSession(context.Context, uuid.UUID) (*model.StudySession, error)
 	FindSuccessor(context.Context, uuid.UUID) (*model.StudySession, error)
 	ListSessionItems(context.Context, uuid.UUID) ([]model.StudySessionItem, error)
@@ -136,12 +137,63 @@ func (store *studyStoreTx) Profile() model.StudyLearnerProfile {
 	return store.profile
 }
 
+func (store *studyStoreTx) Scope() model.StudyNormalizedScope {
+	return cloneStudyNormalizedScope(store.scope)
+}
+
 func (store *studyStoreTx) NonterminalSession() *model.StudySession {
 	if store.nonterminal == nil {
 		return nil
 	}
-	copyOfSession := *store.nonterminal
+	copyOfSession := cloneStudySession(*store.nonterminal)
 	return &copyOfSession
+}
+
+func (store *studyStoreTx) CapturedEligibleCorpusSHA256() (string, error) {
+	if !store.eligibleSourcesCaptured {
+		return "", newStudyStorageError(
+			model.StudyErrorCodeStateStale,
+			"study eligibility snapshot has not been captured",
+			"study_eligible_corpus_read",
+			false,
+			nil,
+		)
+	}
+	if !model.IsStudySHA256(store.eligibleCorpusSHA256) {
+		return "", newStudyStorageError(
+			model.StudyErrorCodeInternal,
+			"captured study corpus identity is invalid",
+			"study_eligible_corpus_read",
+			false,
+			nil,
+		)
+	}
+	return store.eligibleCorpusSHA256, nil
+}
+
+func cloneStudyNormalizedScope(scope model.StudyNormalizedScope) model.StudyNormalizedScope {
+	clone := scope
+	clone.CanonicalSelector = append([]byte(nil), scope.CanonicalSelector...)
+	clone.Scope.TopicIDs = append([]uuid.UUID(nil), scope.Scope.TopicIDs...)
+	clone.Scope.TopicRefs = append([]string(nil), scope.Scope.TopicRefs...)
+	return clone
+}
+
+func cloneStudySession(session model.StudySession) model.StudySession {
+	clone := session
+	clone.Scope = cloneStudyNormalizedScope(session.Scope)
+	if session.Scheduler != nil {
+		scheduler := *session.Scheduler
+		clone.Scheduler = &scheduler
+	}
+	clone.PredecessorStudySessionID = cloneStudyUUIDPointer(session.PredecessorStudySessionID)
+	clone.SuccessorStudySessionID = cloneStudyUUIDPointer(session.SuccessorStudySessionID)
+	clone.TerminalizedAt = cloneStudyTimePointer(session.TerminalizedAt)
+	if session.TerminalProfileIngestionHighWater != nil {
+		highWater := *session.TerminalProfileIngestionHighWater
+		clone.TerminalProfileIngestionHighWater = &highWater
+	}
+	return clone
 }
 
 // WithStudyScopeTransaction establishes the canonical study lock order and
@@ -1186,7 +1238,10 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 	store.eligibleSourcesCaptured = true
 	store.eligibleSources = make(map[uuid.UUID]StudyEligibleSource, len(ideaIDs))
 	if len(ideaIDs) == 0 {
-		store.eligibleCorpusSHA256 = studyEligibleCorpusDigest(store.scope, nil)
+		store.eligibleCorpusSHA256, err = computeStudyEligibleCorpusDigest(store.scope, nil)
+		if err != nil {
+			return nil, mapStudyDigestStorageError("study_eligible_corpus_digest", err)
+		}
 		return []StudyEligibleSource{}, nil
 	}
 
@@ -1268,7 +1323,9 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 		); err != nil {
 			return nil, mapStudyStorageError("study_eligible_sources_read", err)
 		}
-		materializeStudyEligibleSource(&source, store.scope.Scope.CardKind)
+		if err := materializeStudyEligibleSource(&source, store.scope.Scope.CardKind); err != nil {
+			return nil, err
+		}
 		captured := cloneStudyEligibleSource(source)
 		store.eligibleSources[source.IdeaID] = captured
 		sources = append(sources, cloneStudyEligibleSource(captured))
@@ -1279,7 +1336,10 @@ func (store *studyStoreTx) ListEligibleSources(ctx context.Context) ([]StudyElig
 	if len(sources) != len(ideaIDs) {
 		return nil, newStudyStorageError(model.StudyErrorCodeStateStale, "study eligibility projection changed while locked", "study_eligible_sources_read", false, nil)
 	}
-	store.eligibleCorpusSHA256 = studyEligibleCorpusDigest(store.scope, sources)
+	store.eligibleCorpusSHA256, err = computeStudyEligibleCorpusDigest(store.scope, sources)
+	if err != nil {
+		return nil, mapStudyDigestStorageError("study_eligible_corpus_digest", err)
+	}
 	return sources, nil
 }
 
@@ -1331,7 +1391,7 @@ func cloneStudyTimePointer(value *time.Time) *time.Time {
 	return &copyOfValue
 }
 
-func studyEligibleCorpusDigest(scope model.StudyNormalizedScope, sources []StudyEligibleSource) string {
+func computeStudyEligibleCorpusDigest(scope model.StudyNormalizedScope, sources []StudyEligibleSource) (string, error) {
 	parts := make([][]byte, 0, 3+len(scope.Scope.TopicIDs)+len(sources)*4)
 	parts = append(parts, studyDigestCount(len(scope.Scope.TopicIDs)))
 	for _, topicID := range scope.Scope.TopicIDs {
@@ -1347,7 +1407,7 @@ func studyEligibleCorpusDigest(scope model.StudyNormalizedScope, sources []Study
 			[]byte(source.SourceContentSHA256),
 		)
 	}
-	return framedStudyDigest("corpus", parts...)
+	return studydigest.Corpus(parts...)
 }
 
 func studyDigestCount(count int) []byte {
@@ -1356,7 +1416,7 @@ func studyDigestCount(count int) []byte {
 	return encoded[:]
 }
 
-func materializeStudyEligibleSource(source *StudyEligibleSource, cardKind model.StudyCardKind) {
+func materializeStudyEligibleSource(source *StudyEligibleSource, cardKind model.StudyCardKind) error {
 	definitionMarker := []byte("summary")
 	definitionID := source.IdeaID.String()
 	definitionRevision := studySourceRevisionTime(source.IdeaUpdatedAt)
@@ -1373,8 +1433,7 @@ func materializeStudyEligibleSource(source *StudyEligibleSource, cardKind model.
 		exampleID = source.ExampleID.String()
 		exampleRevision = studySourceRevisionTime(*source.ExampleUpdatedAt)
 	}
-	sourceDigest := framedStudyDigest(
-		"card-source",
+	sourceDigest, err := studydigest.CardSource(
 		[]byte(source.IdeaID.String()),
 		[]byte(studySourceRevisionTime(source.IdeaUpdatedAt)),
 		[]byte(source.CanonicalNameID.String()),
@@ -1386,13 +1445,15 @@ func materializeStudyEligibleSource(source *StudyEligibleSource, cardKind model.
 		[]byte(exampleID),
 		[]byte(exampleRevision),
 	)
+	if err != nil {
+		return mapStudyDigestStorageError("study_eligible_source_digest", err)
+	}
 	source.SourceContentRevision = "study-card-source-v1:" + sourceDigest
 	exampleValue := []byte(nil)
 	if source.Example != nil {
 		exampleValue = []byte(*source.Example)
 	}
-	source.SourceContentSHA256 = framedStudyDigest(
-		"card-content",
+	source.SourceContentSHA256, err = studydigest.CardContent(
 		[]byte(cardKind),
 		[]byte(source.IdeaID.String()),
 		[]byte(source.IdeaID.String()),
@@ -1401,31 +1462,24 @@ func materializeStudyEligibleSource(source *StudyEligibleSource, cardKind model.
 		exampleMarker,
 		exampleValue,
 	)
+	if err != nil {
+		return mapStudyDigestStorageError("study_eligible_content_digest", err)
+	}
+	return nil
 }
 
 func studySourceRevisionTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func framedStudyDigest(purpose string, parts ...[]byte) string {
-	hash := sha256.New()
-	_, _ = hash.Write([]byte("lexinet-study-digest-v1\x00"))
-	writeStudyDigestFrame(hash, []byte(purpose))
-	for _, part := range parts {
-		writeStudyDigestFrame(hash, part)
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
-
-type studyDigestWriter interface {
-	Write([]byte) (int, error)
-}
-
-func writeStudyDigestFrame(writer studyDigestWriter, value []byte) {
-	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
-	_, _ = writer.Write(length[:])
-	_, _ = writer.Write(value)
+func mapStudyDigestStorageError(operation string, err error) error {
+	return newStudyStorageError(
+		model.StudyErrorCodeInternal,
+		"study persistence digest could not be computed",
+		operation,
+		false,
+		err,
+	)
 }
 
 func (store *studyStoreTx) ReadAcceptedPrefix(ctx context.Context, highWater int64) ([]model.StudyEvent, error) {

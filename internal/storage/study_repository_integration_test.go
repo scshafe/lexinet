@@ -564,7 +564,7 @@ func testConcurrentStudyPlanConvergence(
 					if listErr != nil {
 						return listErr
 					}
-					expectedCorpusSHA256 = studyEligibleCorpusDigest(scope, sources)
+					expectedCorpusSHA256 = mustStudyEligibleCorpusDigest(t, scope, sources)
 					if len(sources) == 1 {
 						copyOfSource := cloneStudyEligibleSource(sources[0])
 						expectedSource = &copyOfSource
@@ -1536,7 +1536,7 @@ func testStudyScopeInputIsolation(
 		if len(sources) != 1 || sources[0].IdeaID != originalIdea.ID {
 			return errors.New("caller scope mutation changed the locked eligibility set")
 		}
-		expectedCorpusSHA256 = studyEligibleCorpusDigest(expectedScope, sources)
+		expectedCorpusSHA256 = mustStudyEligibleCorpusDigest(t, expectedScope, sources)
 		var insertErr error
 		created, insertErr = store.InsertPlanOnce(ctx, plan)
 		return insertErr
@@ -1625,6 +1625,19 @@ func testStudyPlan(
 			},
 		}},
 	}
+}
+
+func mustStudyEligibleCorpusDigest(
+	t *testing.T,
+	scope model.StudyNormalizedScope,
+	sources []StudyEligibleSource,
+) string {
+	t.Helper()
+	digest, err := computeStudyEligibleCorpusDigest(scope, sources)
+	if err != nil {
+		t.Fatalf("STUDY_TEST.CORPUS_DIGEST_FAILED: %v", err)
+	}
+	return digest
 }
 
 func insertAcceptedStudyPrefix(
