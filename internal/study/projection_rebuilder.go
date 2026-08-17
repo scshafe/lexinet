@@ -2,15 +2,26 @@ package study
 
 import (
 	"sort"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
 	"lexinet/internal/model"
 )
 
-const studyProjectionRebuildOperation = "study_projection_rebuild"
+const (
+	studyProjectionRebuildOperation = "study_projection_rebuild"
+
+	// StudyProjectionSchemaVersionV1 is the only canonical projection payload
+	// schema currently implemented by RebuildStudyCardProjections.
+	StudyProjectionSchemaVersionV1 = 1
+	// StudyProjectionTargetLimit caps one pure rebuild before allocation and
+	// canonical encoding work begins.
+	StudyProjectionTargetLimit = StudyMaximumSchedulingCards
+	// StudyProjectionAcceptedEventLimit caps both the accepted prefix and its
+	// declared high-water. Larger histories require an explicitly versioned
+	// projector design rather than implicit unbounded replay.
+	StudyProjectionAcceptedEventLimit = 262_144
+)
 
 // StudyProjectionTarget identifies one current scheduler identity whose state
 // must be present in a complete rebuild. A nil LiveSourceIdeaID explicitly
@@ -50,6 +61,13 @@ func RebuildStudyCardProjections(input StudyProjectionRebuildInput) ([]model.Stu
 	if err := validateStudyProjectionRebuildIdentity(input); err != nil {
 		return nil, err
 	}
+	if err := validateStudyProjectionResourceCounts(
+		len(input.Targets),
+		len(input.AcceptedEvents),
+		input.ProfileIngestionHighWater,
+	); err != nil {
+		return nil, err
+	}
 	targets, err := normalizeStudyProjectionTargets(input.Targets)
 	if err != nil {
 		return nil, err
@@ -82,25 +100,25 @@ func validateStudyProjectionRebuildIdentity(input StudyProjectionRebuildInput) e
 			"learner_profile_invalid",
 		)
 	}
-	if !boundedStudyProjectionText(input.SchedulerName, 128) {
+	if input.SchedulerName != VarietyFirstV1Name {
 		return newStudyProjectionError(
 			model.StudyErrorCodeSchemaInvalid,
-			"study projection scheduler name is invalid",
-			"scheduler_name_invalid",
+			"study projection scheduler name is unsupported",
+			"scheduler_name_unsupported",
 		)
 	}
-	if !boundedStudyProjectionText(input.SchedulerVersion, 64) {
+	if input.SchedulerVersion != VarietyFirstV1Version {
 		return newStudyProjectionError(
 			model.StudyErrorCodeSchemaInvalid,
-			"study projection scheduler version is invalid",
-			"scheduler_version_invalid",
+			"study projection scheduler version is unsupported",
+			"scheduler_version_unsupported",
 		)
 	}
-	if input.ProjectionSchemaVersion < 1 {
+	if input.ProjectionSchemaVersion != StudyProjectionSchemaVersionV1 {
 		return newStudyProjectionError(
 			model.StudyErrorCodeSchemaInvalid,
-			"study projection schema version is invalid",
-			"projection_schema_version_invalid",
+			"study projection schema version is unsupported",
+			"projection_schema_version_unsupported",
 		)
 	}
 	if input.ProfileIngestionHighWater < 0 {
@@ -108,6 +126,31 @@ func validateStudyProjectionRebuildIdentity(input StudyProjectionRebuildInput) e
 			model.StudyErrorCodeSchemaInvalid,
 			"study projection high-water is invalid",
 			"profile_ingestion_high_water_invalid",
+		)
+	}
+	return nil
+}
+
+func validateStudyProjectionResourceCounts(targetCount, acceptedEventCount int, highWater int64) error {
+	if targetCount > StudyProjectionTargetLimit {
+		return newStudyProjectionError(
+			model.StudyErrorCodeRequestTooLarge,
+			"study projection target count exceeds its resource bound",
+			"target_count_exceeds_limit",
+		)
+	}
+	if acceptedEventCount > StudyProjectionAcceptedEventLimit {
+		return newStudyProjectionError(
+			model.StudyErrorCodeRequestTooLarge,
+			"study projection accepted event count exceeds its resource bound",
+			"accepted_event_count_exceeds_limit",
+		)
+	}
+	if highWater > StudyProjectionAcceptedEventLimit {
+		return newStudyProjectionError(
+			model.StudyErrorCodeRequestTooLarge,
+			"study projection high-water exceeds its resource bound",
+			"profile_ingestion_high_water_exceeds_limit",
 		)
 	}
 	return nil
@@ -149,10 +192,6 @@ func normalizeStudyProjectionTargets(targets []StudyProjectionTarget) ([]StudyPr
 		}
 	}
 	return normalized, nil
-}
-
-func boundedStudyProjectionText(value string, maximumRunes int) bool {
-	return utf8.ValidString(value) && strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maximumRunes
 }
 
 func newStudyProjectionError(code model.StudyErrorCode, message, reason string) *model.StudyError {

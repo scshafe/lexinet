@@ -129,6 +129,221 @@ func TestRebuildStudyCardProjectionsVoidingLatestRatingResurfacesPriorEvidence(t
 	assertProjectionPresented(t, projections[0], events[3].Event.ID, cardID, 4)
 }
 
+func TestRebuildStudyCardProjectionsRejectsCausallyImpossibleAcceptedEvents(t *testing.T) {
+	profileID := projectionTestUUID("causal-profile")
+	cardID := projectionTestUUID("causal-card")
+	sessionID := projectionTestUUID("causal-session")
+	itemID := projectionTestUUID("causal-item")
+	liveSourceID := cardID
+	targets := []StudyProjectionTarget{{CurrentCardIdentity: cardID, LiveSourceIdeaID: &liveSourceID}}
+
+	presented := projectionTestResolvedEvent(
+		projectionTestEvent(profileID, cardID, sessionID, itemID, 1, model.StudyEventKindPresented),
+		cardID,
+	)
+	revealed := projectionTestResolvedEvent(
+		projectionTestEvent(profileID, cardID, sessionID, itemID, 2, model.StudyEventKindRevealed),
+		cardID,
+	)
+	rated := projectionTestResolvedEvent(
+		projectionTestRatedEvent(profileID, cardID, sessionID, itemID, 3, model.StudyRatingGood),
+		cardID,
+	)
+
+	tests := []struct {
+		name   string
+		events []StudyResolvedAcceptedEvent
+		reason string
+	}{
+		{
+			name: "rate is first item fact",
+			events: []StudyResolvedAcceptedEvent{projectionTestResolvedEvent(
+				projectionTestRatedEvent(profileID, cardID, sessionID, itemID, 1, model.StudyRatingGood),
+				cardID,
+			)},
+			reason: "accepted_item_rating_without_revealed",
+		},
+		{
+			name: "reveal is first item fact",
+			events: []StudyResolvedAcceptedEvent{projectionTestResolvedEvent(
+				projectionTestEvent(profileID, cardID, sessionID, itemID, 1, model.StudyEventKindRevealed),
+				cardID,
+			)},
+			reason: "accepted_item_reveal_without_presented",
+		},
+		{
+			name: "presented fact repeats",
+			events: []StudyResolvedAcceptedEvent{
+				presented,
+				projectionTestResolvedEvent(
+					projectionTestEvent(profileID, cardID, sessionID, itemID, 2, model.StudyEventKindPresented),
+					cardID,
+				),
+			},
+			reason: "accepted_item_presented_duplicate",
+		},
+		{
+			name: "revealed fact repeats",
+			events: []StudyResolvedAcceptedEvent{
+				presented,
+				revealed,
+				projectionTestResolvedEvent(
+					projectionTestEvent(profileID, cardID, sessionID, itemID, 3, model.StudyEventKindRevealed),
+					cardID,
+				),
+			},
+			reason: "accepted_item_revealed_duplicate",
+		},
+		{
+			name: "second rating is concurrently effective",
+			events: []StudyResolvedAcceptedEvent{
+				presented,
+				revealed,
+				rated,
+				projectionTestResolvedEvent(
+					projectionTestRatedEvent(profileID, cardID, sessionID, itemID, 4, model.StudyRatingHard),
+					cardID,
+				),
+			},
+			reason: "accepted_item_rating_already_effective",
+		},
+		{
+			name: "void target is unknown",
+			events: []StudyResolvedAcceptedEvent{
+				presented,
+				revealed,
+				projectionTestResolvedEvent(
+					projectionTestVoidedEvent(profileID, cardID, sessionID, itemID, 3, projectionTestUUID("causal-unknown-rating")),
+					cardID,
+				),
+			},
+			reason: "rating_void_target_missing",
+		},
+		{
+			name: "void target is no longer effective",
+			events: func() []StudyResolvedAcceptedEvent {
+				firstVoid := projectionTestResolvedEvent(
+					projectionTestVoidedEvent(profileID, cardID, sessionID, itemID, 4, rated.Event.ID),
+					cardID,
+				)
+				replacement := projectionTestResolvedEvent(
+					projectionTestRatedEvent(profileID, cardID, sessionID, itemID, 5, model.StudyRatingHard),
+					cardID,
+				)
+				secondVoid := projectionTestResolvedEvent(
+					projectionTestVoidedEvent(profileID, cardID, sessionID, itemID, 6, rated.Event.ID),
+					cardID,
+				)
+				return []StudyResolvedAcceptedEvent{presented, revealed, rated, firstVoid, replacement, secondVoid}
+			}(),
+			reason: "rating_void_target_repeated",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := RebuildStudyCardProjections(projectionTestRebuildInput(
+				profileID,
+				int64(len(test.events)),
+				targets,
+				test.events,
+			))
+			assertProjectionStudyError(t, err, model.StudyErrorCodeInternal, test.reason)
+		})
+	}
+}
+
+func TestRebuildStudyCardProjectionsRejectsUnsupportedProjectorIdentity(t *testing.T) {
+	profileID := projectionTestUUID("unsupported-projector-profile")
+
+	tests := []struct {
+		name   string
+		mutate func(*StudyProjectionRebuildInput)
+		reason string
+	}{
+		{
+			name: "scheduler name",
+			mutate: func(input *StudyProjectionRebuildInput) {
+				input.SchedulerName = ShuffleBagV1Name
+			},
+			reason: "scheduler_name_unsupported",
+		},
+		{
+			name: "scheduler version",
+			mutate: func(input *StudyProjectionRebuildInput) {
+				input.SchedulerVersion = "2"
+			},
+			reason: "scheduler_version_unsupported",
+		},
+		{
+			name: "projection schema version",
+			mutate: func(input *StudyProjectionRebuildInput) {
+				input.ProjectionSchemaVersion = StudyProjectionSchemaVersionV1 + 1
+			},
+			reason: "projection_schema_version_unsupported",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := projectionTestRebuildInput(profileID, 0, nil, nil)
+			test.mutate(&input)
+			_, err := RebuildStudyCardProjections(input)
+			assertProjectionStudyError(t, err, model.StudyErrorCodeSchemaInvalid, test.reason)
+		})
+	}
+}
+
+func TestValidateStudyProjectionResourceCountsEnforcesInclusiveBounds(t *testing.T) {
+	if err := validateStudyProjectionResourceCounts(
+		StudyProjectionTargetLimit,
+		StudyProjectionAcceptedEventLimit,
+		StudyProjectionAcceptedEventLimit,
+	); err != nil {
+		t.Fatalf("STUDY_PROJECTION.INCLUSIVE_RESOURCE_BOUND_REJECTED: %v", err)
+	}
+
+	tests := []struct {
+		name               string
+		targetCount        int
+		acceptedEventCount int
+		highWater          int64
+		reason             string
+	}{
+		{
+			name:        "target count",
+			targetCount: StudyProjectionTargetLimit + 1,
+			reason:      "target_count_exceeds_limit",
+		},
+		{
+			name:               "accepted event count",
+			acceptedEventCount: StudyProjectionAcceptedEventLimit + 1,
+			reason:             "accepted_event_count_exceeds_limit",
+		},
+		{
+			name:      "profile ingestion high-water",
+			highWater: StudyProjectionAcceptedEventLimit + 1,
+			reason:    "profile_ingestion_high_water_exceeds_limit",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateStudyProjectionResourceCounts(test.targetCount, test.acceptedEventCount, test.highWater)
+			assertProjectionStudyError(t, err, model.StudyErrorCodeRequestTooLarge, test.reason)
+		})
+	}
+
+	input := projectionTestRebuildInput(
+		projectionTestUUID("resource-boundary-profile"),
+		StudyProjectionAcceptedEventLimit+1,
+		nil,
+		nil,
+	)
+	_, err := RebuildStudyCardProjections(input)
+	assertProjectionStudyError(t, err, model.StudyErrorCodeRequestTooLarge, "profile_ingestion_high_water_exceeds_limit")
+}
+
 func TestRebuildStudyCardProjectionsConsolidatesMergedHistoricalEvidence(t *testing.T) {
 	profileID := projectionTestUUID("merge-profile")
 	historicalSourceID := projectionTestUUID("merge-source-card")
@@ -333,38 +548,58 @@ func TestRebuildStudyCardProjectionsRejectsCorruptAcceptedPrefixes(t *testing.T)
 		},
 		{
 			name:      "void target belongs to another item",
-			highWater: 2,
+			highWater: 5,
 			events: func() []StudyResolvedAcceptedEvent {
+				presented := projectionTestResolvedEvent(
+					projectionTestEvent(profileID, historicalCardID, sessionID, itemID, 1, model.StudyEventKindPresented),
+					currentCardID,
+				)
+				revealed := projectionTestResolvedEvent(
+					projectionTestEvent(profileID, historicalCardID, sessionID, itemID, 2, model.StudyEventKindRevealed),
+					currentCardID,
+				)
 				rated := projectionTestResolvedEvent(
-					projectionTestRatedEvent(profileID, historicalCardID, sessionID, itemID, 1, model.StudyRatingGood),
+					projectionTestRatedEvent(profileID, historicalCardID, sessionID, itemID, 3, model.StudyRatingGood),
+					currentCardID,
+				)
+				otherPresented := projectionTestResolvedEvent(
+					projectionTestEvent(profileID, historicalCardID, sessionID, otherItemID, 4, model.StudyEventKindPresented),
 					currentCardID,
 				)
 				voided := projectionTestResolvedEvent(
-					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, otherItemID, 2, rated.Event.ID),
+					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, otherItemID, 5, rated.Event.ID),
 					currentCardID,
 				)
-				return []StudyResolvedAcceptedEvent{rated, voided}
+				return []StudyResolvedAcceptedEvent{presented, revealed, rated, otherPresented, voided}
 			}(),
 			code:   model.StudyErrorCodeInternal,
 			reason: "rating_void_target_corrupt",
 		},
 		{
 			name:      "same rating is voided twice",
-			highWater: 3,
+			highWater: 5,
 			events: func() []StudyResolvedAcceptedEvent {
+				presented := projectionTestResolvedEvent(
+					projectionTestEvent(profileID, historicalCardID, sessionID, itemID, 1, model.StudyEventKindPresented),
+					currentCardID,
+				)
+				revealed := projectionTestResolvedEvent(
+					projectionTestEvent(profileID, historicalCardID, sessionID, itemID, 2, model.StudyEventKindRevealed),
+					currentCardID,
+				)
 				rated := projectionTestResolvedEvent(
-					projectionTestRatedEvent(profileID, historicalCardID, sessionID, itemID, 1, model.StudyRatingGood),
+					projectionTestRatedEvent(profileID, historicalCardID, sessionID, itemID, 3, model.StudyRatingGood),
 					currentCardID,
 				)
 				firstVoid := projectionTestResolvedEvent(
-					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, itemID, 2, rated.Event.ID),
+					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, itemID, 4, rated.Event.ID),
 					currentCardID,
 				)
 				secondVoid := projectionTestResolvedEvent(
-					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, itemID, 3, rated.Event.ID),
+					projectionTestVoidedEvent(profileID, historicalCardID, sessionID, itemID, 5, rated.Event.ID),
 					currentCardID,
 				)
-				return []StudyResolvedAcceptedEvent{rated, firstVoid, secondVoid}
+				return []StudyResolvedAcceptedEvent{presented, revealed, rated, firstVoid, secondVoid}
 			}(),
 			code:   model.StudyErrorCodeInternal,
 			reason: "rating_void_target_repeated",
@@ -476,7 +711,7 @@ func projectionTestRebuildInput(
 		LearnerProfileID:          profileID,
 		SchedulerName:             VarietyFirstV1Name,
 		SchedulerVersion:          VarietyFirstV1Version,
-		ProjectionSchemaVersion:   1,
+		ProjectionSchemaVersion:   StudyProjectionSchemaVersionV1,
 		ProfileIngestionHighWater: highWater,
 		Targets:                   targets,
 		AcceptedEvents:            events,
@@ -603,7 +838,9 @@ func assertProjectionStudyError(t *testing.T, err error, code model.StudyErrorCo
 	if !errors.As(err, &studyError) || studyError.Code != code {
 		t.Fatalf("STUDY_PROJECTION.UNEXPECTED_ERROR: got=%v want_code=%s", err, code)
 	}
-	if studyError.Context["operation"] != studyProjectionRebuildOperation || studyError.Context["reason"] != reason {
+	if len(studyError.Context) != 2 ||
+		studyError.Context["operation"] != studyProjectionRebuildOperation ||
+		studyError.Context["reason"] != reason {
 		t.Fatalf("STUDY_PROJECTION.UNEXPECTED_ERROR_CONTEXT: %#v", studyError.Context)
 	}
 	if studyError.Cause != nil || studyError.Retryable {
