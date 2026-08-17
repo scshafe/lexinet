@@ -347,26 +347,222 @@ func validateStudySuccessResource(responseJSON []byte, successKind studyClientSu
 	if !ok {
 		return false
 	}
+	if !validateStudyProtocolEnvelope(members) {
+		return false
+	}
+	switch successKind {
+	case studyClientSuccessCreateSession:
+		return validateStudySessionResource(responseJSON, members, true)
+	case studyClientSuccessSessionState:
+		return validateStudySessionResource(responseJSON, members, false)
+	case studyClientSuccessSync:
+		if !hasStudyResponseMembers(members, studySyncRequiredMembers[:]) ||
+			!validNonzeroStudyUUIDMember(members["sync_id"]) {
+			return false
+		}
+		var resource studysession.StudySyncResource
+		if err := json.Unmarshal(responseJSON, &resource); err != nil || !validateStudySyncResource(resource) {
+			return false
+		}
+		sessionJSON := members["session"]
+		sessionMembers, sessionOK := decodeUniqueStudyTopLevelObject(sessionJSON)
+		return sessionOK && validateStudyProtocolEnvelope(sessionMembers) &&
+			validateStudySessionResource(sessionJSON, sessionMembers, false) &&
+			resource.Session.SessionID == resource.FlushReceipt.SessionID
+	default:
+		return false
+	}
+}
+
+var studySessionRequiredMembers = [...]string{
+	"protocol_version",
+	"schema_version",
+	"required_semantics",
+	"session_id",
+	"profile_ref",
+	"scope",
+	"lifecycle",
+	"creation_receipt",
+	"predecessor_session_id",
+	"successor_session_id",
+	"corpus_sha256",
+	"profile_ingestion_high_water",
+	"state_version",
+	"scheduler",
+	"page",
+	"generated_at",
+}
+
+var studySyncRequiredMembers = [...]string{
+	"protocol_version",
+	"schema_version",
+	"required_semantics",
+	"sync_id",
+	"normalized_request_sha256",
+	"client_stream_id",
+	"adjudicated_through_sequence",
+	"profile_ingestion_high_water",
+	"receipts",
+	"flush_receipt",
+	"session",
+	"generated_at",
+}
+
+func validateStudyProtocolEnvelope(members map[string]json.RawMessage) bool {
 	var protocolVersion string
 	var schemaVersion int
+	var requiredSemantics []string
 	if err := json.Unmarshal(members["protocol_version"], &protocolVersion); err != nil || protocolVersion != model.StudyProtocolVersion {
 		return false
 	}
 	if err := json.Unmarshal(members["schema_version"], &schemaVersion); err != nil || schemaVersion != model.StudySchemaVersion {
 		return false
 	}
-	switch successKind {
-	case studyClientSuccessCreateSession, studyClientSuccessSessionState:
-		return validNonzeroStudyUUIDMember(members["session_id"])
-	case studyClientSuccessSync:
-		if !validNonzeroStudyUUIDMember(members["sync_id"]) {
+	if err := json.Unmarshal(members["required_semantics"], &requiredSemantics); err != nil {
+		return false
+	}
+	canonicalSemantics := studysession.RequiredStudySemantics()
+	if len(requiredSemantics) != len(canonicalSemantics) {
+		return false
+	}
+	for index := range canonicalSemantics {
+		if requiredSemantics[index] != canonicalSemantics[index] {
 			return false
 		}
-		sessionMembers, sessionOK := decodeUniqueStudyTopLevelObject(members["session"])
-		return sessionOK && validNonzeroStudyUUIDMember(sessionMembers["session_id"])
+	}
+	return true
+}
+
+func validateStudySessionResource(rawJSON []byte, members map[string]json.RawMessage, requireCreationReceipt bool) bool {
+	if !hasStudyResponseMembers(members, studySessionRequiredMembers[:]) ||
+		!validNonzeroStudyUUIDMember(members["session_id"]) {
+		return false
+	}
+	var resource studysession.StudySessionResource
+	if err := json.Unmarshal(rawJSON, &resource); err != nil {
+		return false
+	}
+	if resource.SessionID == uuid.Nil || resource.ProtocolVersion != model.StudyProtocolVersion ||
+		resource.SchemaVersion != model.StudySchemaVersion || !resource.Lifecycle.Valid() ||
+		!resource.Scope.CardKind.Valid() || len(resource.Scope.TopicRefs) < 1 ||
+		len(resource.Scope.TopicRefs) > model.StudyMaximumTopics ||
+		strings.TrimSpace(resource.ProfileRef) == "" || !model.IsStudySHA256(resource.CorpusSHA256) ||
+		resource.ProfileIngestionHighWater < 0 || resource.StateVersion < 1 ||
+		resource.GeneratedAt.IsZero() || !validateStudySessionPageResource(members["page"], resource.Page) {
+		return false
+	}
+	if requireCreationReceipt && resource.CreationReceipt == nil {
+		return false
+	}
+	if !requireCreationReceipt && resource.CreationReceipt != nil {
+		return false
+	}
+	if resource.CreationReceipt != nil && !validateStudyCreationReceiptResource(*resource.CreationReceipt, resource.SessionID) {
+		return false
+	}
+	if (resource.PredecessorSessionID != nil && (*resource.PredecessorSessionID == uuid.Nil || *resource.PredecessorSessionID == resource.SessionID)) ||
+		(resource.SuccessorSessionID != nil && (*resource.SuccessorSessionID == uuid.Nil || *resource.SuccessorSessionID == resource.SessionID)) ||
+		(resource.PredecessorSessionID != nil && resource.SuccessorSessionID != nil && *resource.PredecessorSessionID == *resource.SuccessorSessionID) {
+		return false
+	}
+	if resource.Scheduler != nil && !validateStudySchedulerResource(*resource.Scheduler, resource.ProfileIngestionHighWater) {
+		return false
+	}
+	switch resource.Lifecycle {
+	case model.StudySessionLifecycleActive:
+		return resource.Scheduler != nil && resource.SuccessorSessionID == nil
+	case model.StudySessionLifecycleCompleted:
+		return resource.Scheduler != nil && resource.SuccessorSessionID != nil
+	case model.StudySessionLifecycleWaitingForCorpus:
+		return resource.Scheduler == nil && resource.SuccessorSessionID == nil && len(resource.Page.Items) == 0
+	case model.StudySessionLifecycleSupersededEmpty:
+		return resource.Scheduler == nil && resource.SuccessorSessionID != nil && len(resource.Page.Items) == 0
+	case model.StudySessionLifecycleAbandoned:
+		return resource.SuccessorSessionID == nil
 	default:
 		return false
 	}
+}
+
+func validateStudyCreationReceiptResource(receipt studysession.StudyCreationReceiptResource, sessionID uuid.UUID) bool {
+	return receipt.CreationRequestID != uuid.Nil && model.IsStudySHA256(receipt.NormalizedRequestSHA256) &&
+		receipt.Disposition.Valid() && receipt.CanonicalSessionID == sessionID
+}
+
+func validateStudySchedulerResource(scheduler studysession.StudySchedulerResource, liveHighWater int64) bool {
+	return strings.TrimSpace(scheduler.Name) != "" && strings.TrimSpace(scheduler.Version) != "" &&
+		model.IsStudySHA256(scheduler.ConfigurationSHA256) && scheduler.InputProfileIngestionHighWater >= 0 &&
+		scheduler.InputProfileIngestionHighWater <= liveHighWater && !scheduler.PlannedAt.IsZero() &&
+		strings.TrimSpace(scheduler.Seed) != ""
+}
+
+func validateStudySessionPageResource(rawJSON json.RawMessage, page studysession.StudySessionPageResource) bool {
+	members, ok := decodeUniqueStudyTopLevelObject(rawJSON)
+	if !ok || !hasStudyResponseMembers(members, []string{"after_position", "next_after_position", "complete", "items"}) {
+		return false
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		return false
+	}
+	_, err = model.DecodeExactStudySessionPageDocument(encoded)
+	return err == nil
+}
+
+func validateStudySyncResource(resource studysession.StudySyncResource) bool {
+	if resource.SyncID == uuid.Nil || !model.IsStudySHA256(resource.NormalizedRequestSHA256) ||
+		resource.ClientStreamID == uuid.Nil || resource.AdjudicatedThroughSequence < 0 ||
+		resource.ProfileIngestionHighWater < 0 || resource.Receipts == nil ||
+		len(resource.Receipts) > model.StudyMaximumEvents || resource.GeneratedAt.IsZero() {
+		return false
+	}
+	flush := resource.FlushReceipt
+	if flush.ReceiptID == uuid.Nil || flush.SessionID == uuid.Nil || flush.SyncID != resource.SyncID ||
+		flush.ClientStreamID != resource.ClientStreamID ||
+		flush.AcknowledgedThroughSequence != resource.AdjudicatedThroughSequence ||
+		flush.ProfileIngestionHighWater != resource.ProfileIngestionHighWater ||
+		flush.StateVersion < 1 || flush.IssuedAt.IsZero() {
+		return false
+	}
+	previousSequence := int64(0)
+	seenEventIDs := make(map[uuid.UUID]struct{}, len(resource.Receipts))
+	for _, receipt := range resource.Receipts {
+		if receipt.ClientSequence < 1 || receipt.ClientSequence <= previousSequence ||
+			receipt.ClientSequence > resource.AdjudicatedThroughSequence || receipt.EventID == uuid.Nil ||
+			!model.IsStudySHA256(receipt.PayloadSHA256) || !receipt.Disposition.Valid() ||
+			!receipt.Code.ValidFor(receipt.Disposition) {
+			return false
+		}
+		if _, duplicate := seenEventIDs[receipt.EventID]; duplicate {
+			return false
+		}
+		seenEventIDs[receipt.EventID] = struct{}{}
+		previousSequence = receipt.ClientSequence
+		switch receipt.Disposition {
+		case model.StudyEventReceiptDispositionAccepted, model.StudyEventReceiptDispositionSemanticDuplicate:
+			if receipt.CanonicalEventID == nil || *receipt.CanonicalEventID == uuid.Nil ||
+				receipt.ProfileIngestionOrdinal == nil || *receipt.ProfileIngestionOrdinal < 1 ||
+				*receipt.ProfileIngestionOrdinal > resource.ProfileIngestionHighWater {
+				return false
+			}
+		case model.StudyEventReceiptDispositionTerminalRejected:
+			if receipt.CanonicalEventID != nil || receipt.ProfileIngestionOrdinal != nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func hasStudyResponseMembers(members map[string]json.RawMessage, required []string) bool {
+	for _, name := range required {
+		if _, ok := members[name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeUniqueStudyTopLevelObject(rawJSON []byte) (map[string]json.RawMessage, bool) {

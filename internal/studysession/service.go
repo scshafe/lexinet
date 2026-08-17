@@ -350,7 +350,7 @@ func (service *StudySessionService) Sync(
 	resource := StudySyncResource{
 		ProtocolVersion:            model.StudyProtocolVersion,
 		SchemaVersion:              model.StudySchemaVersion,
-		RequiredSemantics:          requiredStudySemantics(),
+		RequiredSemantics:          RequiredStudySemantics(),
 		SyncID:                     request.SyncID,
 		NormalizedRequestSHA256:    normalizedRequestSHA256,
 		ClientStreamID:             request.ClientStreamID,
@@ -500,7 +500,7 @@ func buildStudySessionResource(
 	return StudySessionResource{
 		ProtocolVersion:   model.StudyProtocolVersion,
 		SchemaVersion:     model.StudySchemaVersion,
-		RequiredSemantics: requiredStudySemantics(),
+		RequiredSemantics: RequiredStudySemantics(),
 		SessionID:         session.ID,
 		ProfileRef:        profileRef,
 		Scope: StudyScopeResource{
@@ -834,10 +834,6 @@ func studyFlushReceiptResource(receipt model.StudyFlushReceipt) StudyFlushReceip
 		StateVersion:                receipt.StudySessionStateVersion,
 		IssuedAt:                    receipt.IssuedAt.UTC(),
 	}
-}
-
-func requiredStudySemantics() []string {
-	return append([]string(nil), studyRequiredSemantics[:]...)
 }
 
 func boundedStudyServiceText(value string, maximumRunes int) bool {

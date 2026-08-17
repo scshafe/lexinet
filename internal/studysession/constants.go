@@ -37,3 +37,10 @@ var studyRequiredSemantics = [...]string{
 	"normalized_hash_idempotency",
 	"late_completed_predecessor_correction",
 }
+
+// RequiredStudySemantics returns the exact ordered semantic capabilities a
+// study.v1 consumer must understand. The returned slice is detached so callers
+// cannot mutate the canonical protocol authority.
+func RequiredStudySemantics() []string {
+	return append([]string(nil), studyRequiredSemantics[:]...)
+}

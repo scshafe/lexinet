@@ -65,6 +65,8 @@ func TestStudySessionAndSyncCommandsPreserveRawRequestAndResponse(t *testing.T) 
 		t.Fatal(err)
 	}
 	syncRequest := []byte("{\"operation\":\"sync\"}\n")
+	sessionResponse := strings.TrimSuffix(studyClientTestCreateResource, "}") + `,"operation":"session","raw":true}`
+	syncResponse := strings.TrimSuffix(studyClientTestSyncResource, "}") + `,"operation":"sync","raw":true}` + "\n"
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -85,13 +87,13 @@ func TestStudySessionAndSyncCommandsPreserveRawRequestAndResponse(t *testing.T) 
 				t.Fatalf("session request changed: %q", body)
 			}
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"protocol_version":"study.v1","schema_version":1,"session_id":"11111111-1111-1111-1111-111111111111","operation":"session","raw":true}`))
+			_, _ = writer.Write([]byte(sessionResponse))
 		case "/api/v1/study/sessions/" + studyClientTestSessionID + "/sync":
 			if !bytes.Equal(body, syncRequest) {
 				t.Fatalf("sync request changed: %q", body)
 			}
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte("{\"protocol_version\":\"study.v1\",\"schema_version\":1,\"sync_id\":\"22222222-2222-2222-2222-222222222222\",\"session\":{\"session_id\":\"11111111-1111-1111-1111-111111111111\"},\"operation\":\"sync\",\"raw\":true}\n"))
+			_, _ = writer.Write([]byte(syncResponse))
 		default:
 			t.Fatalf("unexpected path %q", request.URL.Path)
 		}
@@ -106,7 +108,7 @@ func TestStudySessionAndSyncCommandsPreserveRawRequestAndResponse(t *testing.T) 
 	if err != nil {
 		t.Fatalf("study session: %v", err)
 	}
-	if sessionOutput != "{\"protocol_version\":\"study.v1\",\"schema_version\":1,\"session_id\":\"11111111-1111-1111-1111-111111111111\",\"operation\":\"session\",\"raw\":true}\n" {
+	if sessionOutput != sessionResponse+"\n" {
 		t.Fatalf("session output = %q", sessionOutput)
 	}
 
@@ -118,7 +120,7 @@ func TestStudySessionAndSyncCommandsPreserveRawRequestAndResponse(t *testing.T) 
 	if err != nil {
 		t.Fatalf("study sync: %v", err)
 	}
-	if syncOutput != "{\"protocol_version\":\"study.v1\",\"schema_version\":1,\"sync_id\":\"22222222-2222-2222-2222-222222222222\",\"session\":{\"session_id\":\"11111111-1111-1111-1111-111111111111\"},\"operation\":\"sync\",\"raw\":true}\n" {
+	if syncOutput != syncResponse {
 		t.Fatalf("sync output = %q", syncOutput)
 	}
 	if calls.Load() != 2 {
@@ -128,6 +130,7 @@ func TestStudySessionAndSyncCommandsPreserveRawRequestAndResponse(t *testing.T) 
 
 func TestStudyStateCommandBuildsCanonicalPathAndValidatedQuery(t *testing.T) {
 	setupClientConfig(t)
+	stateResponse := strings.TrimSuffix(studyClientTestSessionResource, "}") + `,"state":true}`
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/api/v1/study/sessions/"+studyClientTestSessionID {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
@@ -136,7 +139,7 @@ func TestStudyStateCommandBuildsCanonicalPathAndValidatedQuery(t *testing.T) {
 			t.Fatalf("query = %q", request.URL.RawQuery)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"protocol_version":"study.v1","schema_version":1,"session_id":"11111111-1111-1111-1111-111111111111","state":true}`))
+		_, _ = writer.Write([]byte(stateResponse))
 	}))
 	defer server.Close()
 
@@ -148,7 +151,7 @@ func TestStudyStateCommandBuildsCanonicalPathAndValidatedQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("study state: %v", err)
 	}
-	if output != "{\"protocol_version\":\"study.v1\",\"schema_version\":1,\"session_id\":\"11111111-1111-1111-1111-111111111111\",\"state\":true}\n" {
+	if output != stateResponse+"\n" {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -196,7 +199,7 @@ func TestStudyCommandRequestFileAndStdinMaxPlusOneBounds(t *testing.T) {
 			t.Fatalf("request bytes = %d, want %d", len(body), studysession.StudyMaximumRequestBodyBytes)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(studyClientTestSessionResource))
+		_, _ = writer.Write([]byte(studyClientTestCreateResource))
 	}))
 	defer server.Close()
 

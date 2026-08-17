@@ -20,10 +20,15 @@ import (
 )
 
 const (
-	studyClientTestSessionID       = "11111111-1111-1111-1111-111111111111"
-	studyClientTestToken           = "study-test-bearer"
-	studyClientTestSessionResource = `{"protocol_version":"study.v1","schema_version":1,"session_id":"11111111-1111-1111-1111-111111111111"}`
-	studyClientTestSyncResource    = `{"protocol_version":"study.v1","schema_version":1,"sync_id":"22222222-2222-2222-2222-222222222222","session":{"session_id":"11111111-1111-1111-1111-111111111111"}}`
+	studyClientTestSessionID         = "11111111-1111-1111-1111-111111111111"
+	studyClientTestToken             = "study-test-bearer"
+	studyClientTestRequiredSemantics = `["active_scope_create_or_resume","immutable_complete_card_projection","scheduler_provenance","singular_presented_revealed","append_only_rated_rating_voided","durable_client_stream_terminal_receipts","server_authoritative_cycle_exhaustion","atomic_predecessor_successor_linking","predecessor_flush_receipt_barrier","waiting_for_corpus_convergence","normalized_hash_idempotency","late_completed_predecessor_correction"]`
+	studyClientTestSessionPrefix     = `{"protocol_version":"study.v1","schema_version":1,"required_semantics":` + studyClientTestRequiredSemantics + `,"session_id":"11111111-1111-1111-1111-111111111111","profile_ref":"operator","scope":{"topic_refs":["topic"],"card_kind":"idea"},"lifecycle":"waiting_for_corpus","creation_receipt":`
+	studyClientTestSessionSuffix     = `,"predecessor_session_id":null,"successor_session_id":null,"corpus_sha256":"0000000000000000000000000000000000000000000000000000000000000000","profile_ingestion_high_water":0,"state_version":1,"scheduler":null,"page":{"after_position":-1,"next_after_position":-1,"complete":true,"items":[]},"generated_at":"2026-08-17T12:00:00Z"}`
+	studyClientTestCreationReceipt   = `{"creation_request_id":"55555555-5555-5555-5555-555555555555","normalized_request_sha256":"2222222222222222222222222222222222222222222222222222222222222222","disposition":"created","canonical_session_id":"11111111-1111-1111-1111-111111111111"}`
+	studyClientTestSessionResource   = studyClientTestSessionPrefix + `null` + studyClientTestSessionSuffix
+	studyClientTestCreateResource    = studyClientTestSessionPrefix + studyClientTestCreationReceipt + studyClientTestSessionSuffix
+	studyClientTestSyncResource      = `{"protocol_version":"study.v1","schema_version":1,"required_semantics":` + studyClientTestRequiredSemantics + `,"sync_id":"22222222-2222-2222-2222-222222222222","normalized_request_sha256":"1111111111111111111111111111111111111111111111111111111111111111","client_stream_id":"33333333-3333-3333-3333-333333333333","adjudicated_through_sequence":0,"profile_ingestion_high_water":0,"receipts":[],"flush_receipt":{"receipt_id":"44444444-4444-4444-4444-444444444444","session_id":"11111111-1111-1111-1111-111111111111","sync_id":"22222222-2222-2222-2222-222222222222","client_stream_id":"33333333-3333-3333-3333-333333333333","acknowledged_through_sequence":0,"profile_ingestion_high_water":0,"state_version":1,"issued_at":"2026-08-17T12:00:00Z"},"session":` + studyClientTestSessionResource + `,"generated_at":"2026-08-17T12:00:00Z"}`
 )
 
 type studyClientRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -358,7 +363,7 @@ func TestStudyClientRequestMaxPlusOneBounds(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(studyClientTestSessionResource)),
+			Body:       io.NopCloser(strings.NewReader(studyClientTestCreateResource)),
 		}, nil
 	})
 
@@ -372,6 +377,26 @@ func TestStudyClientRequestMaxPlusOneBounds(t *testing.T) {
 }
 
 func TestStudyClientRejectsUnexpectedSuccessStatusMediaAndResourceShape(t *testing.T) {
+	missingSemantics := strings.Replace(studyClientTestSessionResource, `"required_semantics":`+studyClientTestRequiredSemantics+`,`, "", 1)
+	unknownSemantics := strings.Replace(studyClientTestSessionResource, `"late_completed_predecessor_correction"`, `"unknown_required_semantic"`, 1)
+	missingRequiredMember := strings.Replace(studyClientTestSessionResource, `"profile_ref":"operator",`, "", 1)
+	nestedMissingSemantics := strings.Replace(
+		studyClientTestSyncResource,
+		`"session":`+studyClientTestSessionResource,
+		`"session":`+missingSemantics,
+		1,
+	)
+	nestedCreationReceipt := strings.Replace(
+		studyClientTestSyncResource,
+		`"session":`+studyClientTestSessionResource,
+		`"session":`+studyClientTestCreateResource,
+		1,
+	)
+	emptySyncHash := strings.Replace(studyClientTestSyncResource, strings.Repeat("1", 64), "", 1)
+	zeroSyncStream := strings.ReplaceAll(studyClientTestSyncResource, "33333333-3333-3333-3333-333333333333", "00000000-0000-0000-0000-000000000000")
+	zeroFlushID := strings.Replace(studyClientTestSyncResource, "44444444-4444-4444-4444-444444444444", "00000000-0000-0000-0000-000000000000", 1)
+	nullReceipts := strings.Replace(studyClientTestSyncResource, `"receipts":[]`, `"receipts":null`, 1)
+	missingNestedPage := strings.Replace(studyClientTestSyncResource, `"page":{"after_position":-1,"next_after_position":-1,"complete":true,"items":[]}`, `"page":{}`, 1)
 	testCases := []struct {
 		name            string
 		statusCode      int
@@ -391,6 +416,18 @@ func TestStudyClientRejectsUnexpectedSuccessStatusMediaAndResourceShape(t *testi
 		{name: "duplicate_protocol", statusCode: http.StatusOK, contentType: "application/json", body: []byte(`{"protocol_version":"study.v1","protocol_version":"study.v1","schema_version":1,"session_id":"11111111-1111-1111-1111-111111111111"}`), successKind: studyClientSuccessSessionState},
 		{name: "wrong_session_kind", statusCode: http.StatusOK, contentType: "application/json", body: []byte(studyClientTestSyncResource), successKind: studyClientSuccessSessionState},
 		{name: "wrong_sync_kind", statusCode: http.StatusOK, contentType: "application/json", body: []byte(studyClientTestSessionResource), successKind: studyClientSuccessSync},
+		{name: "missing_required_semantics", statusCode: http.StatusOK, contentType: "application/json", body: []byte(missingSemantics), successKind: studyClientSuccessSessionState},
+		{name: "unknown_required_semantic", statusCode: http.StatusOK, contentType: "application/json", body: []byte(unknownSemantics), successKind: studyClientSuccessSessionState},
+		{name: "missing_required_member", statusCode: http.StatusOK, contentType: "application/json", body: []byte(missingRequiredMember), successKind: studyClientSuccessSessionState},
+		{name: "nested_session_missing_semantics", statusCode: http.StatusOK, contentType: "application/json", body: []byte(nestedMissingSemantics), successKind: studyClientSuccessSync},
+		{name: "create_missing_receipt", statusCode: http.StatusOK, contentType: "application/json", body: []byte(studyClientTestSessionResource), successKind: studyClientSuccessCreateSession},
+		{name: "state_carries_creation_receipt", statusCode: http.StatusOK, contentType: "application/json", body: []byte(studyClientTestCreateResource), successKind: studyClientSuccessSessionState},
+		{name: "nested_session_carries_creation_receipt", statusCode: http.StatusOK, contentType: "application/json", body: []byte(nestedCreationReceipt), successKind: studyClientSuccessSync},
+		{name: "sync_empty_request_hash", statusCode: http.StatusOK, contentType: "application/json", body: []byte(emptySyncHash), successKind: studyClientSuccessSync},
+		{name: "sync_zero_stream", statusCode: http.StatusOK, contentType: "application/json", body: []byte(zeroSyncStream), successKind: studyClientSuccessSync},
+		{name: "sync_zero_flush_id", statusCode: http.StatusOK, contentType: "application/json", body: []byte(zeroFlushID), successKind: studyClientSuccessSync},
+		{name: "sync_null_receipts", statusCode: http.StatusOK, contentType: "application/json", body: []byte(nullReceipts), successKind: studyClientSuccessSync},
+		{name: "sync_missing_nested_page", statusCode: http.StatusOK, contentType: "application/json", body: []byte(missingNestedPage), successKind: studyClientSuccessSync},
 		{name: "missing_content_type", statusCode: http.StatusOK, body: []byte(studyClientTestSessionResource), successKind: studyClientSuccessSessionState},
 		{name: "non_json_content_type", statusCode: http.StatusOK, contentType: "text/plain", body: []byte(studyClientTestSessionResource), successKind: studyClientSuccessSessionState},
 		{name: "unsupported_content_encoding", statusCode: http.StatusOK, contentType: "application/json", contentEncoding: "gzip", body: []byte(studyClientTestSessionResource), successKind: studyClientSuccessSessionState},
@@ -431,7 +468,7 @@ func TestStudyClientAcceptsBothCreateStatusesAndExactSyncKind(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 				writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 				writer.WriteHeader(statusCode)
-				_, _ = writer.Write([]byte(studyClientTestSessionResource))
+				_, _ = writer.Write([]byte(studyClientTestCreateResource))
 			}))
 			defer server.Close()
 			client := mustStudyHTTPClient(t, server.URL, "")
@@ -522,7 +559,7 @@ func requireStudyClientError(t *testing.T, err error) *StudyClientError {
 
 func studyJSONWithExactSize(t *testing.T, size int) []byte {
 	t.Helper()
-	const prefix = `{"protocol_version":"study.v1","schema_version":1,"session_id":"11111111-1111-1111-1111-111111111111","value":"`
+	prefix := strings.TrimSuffix(studyClientTestSessionResource, "}") + `,"value":"`
 	const suffix = `"}`
 	if size < len(prefix)+len(suffix) {
 		t.Fatalf("JSON size %d is too small", size)
