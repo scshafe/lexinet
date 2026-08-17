@@ -2,7 +2,8 @@
 
 lexinet is an idea-centric technical lexicon network. The root object is an idea, not a word: canonical names, acronyms, aliases, deprecated names, and localized names all resolve to one concept. Definitions, examples, notes, typed relationships, and search attach to that idea.
 
-The project ships as one Go 1.23.4 binary named `lexinet`:
+The project ships as one Go 1.26.5 binary named `lexinet` (with the native
+Tailnet integration pinned to Tailscale v1.102.2):
 
 - `lexinet serve` runs the chi HTTP service on `127.0.0.1:17892` by default.
 - `lexinet migrate` applies the embedded Postgres migrations.
@@ -20,7 +21,7 @@ The project ships as one Go 1.23.4 binary named `lexinet`:
 - Configurable exact, prefix, full-text, and trigram fuzzy search strategies.
 - Optional native macOS menu-bar lookup helper in `clients/macos`.
 - Agent-friendly CLI with `--json`, typed exit codes, stdin body support, and non-interactive destructive guards.
-- Optional bearer auth for loopback-only service routes, and mandatory bearer auth whenever Lexinet's native Tailnet listener is enabled; `/healthz` and `/version` remain public.
+- Optional bearer auth for the legacy loopback API, fail-closed dedicated bearer auth for loopback `study.v1`, and an optional native-TLS Tailnet study surface with per-request identity and capability checks.
 
 ## Build
 
@@ -52,12 +53,124 @@ token_file = "~/.config/lexinet/token"
 listen_loopback = "127.0.0.1:17892"
 auth_token = ""
 tailnet_enabled = false
+tailnet_hostname = "lexinet"
+tailnet_state_dir = "~/.config/lexinet/tsnet-state"
 
 [service.database]
 dsn = "postgres://lexinet@127.0.0.1:5432/lexinet?sslmode=disable"
 ```
 
-The built-in service default is loopback-only with `tailnet_enabled = false`, so local development may leave `service.auth_token` empty. Enabling Lexinet's native Tailnet listener requires a nonempty, non-whitespace `service.auth_token`; an unsafe effective configuration fails before migrations, database access, or listener startup. This validation cannot detect an external TCP proxy aimed at the loopback listener; configure the bearer before exposing Lexinet through `tailscale serve --tcp` or any other proxy.
+The built-in service default is loopback-only with `tailnet_enabled = false`, so
+local development may leave `service.auth_token` empty for legacy routes.
+Loopback `study.v1` still fails closed until that token is configured. The token
+is loopback operator authority; it is not the Tailnet caller identity.
+
+### Tailnet study listener
+
+Tailnet enablement opens a separate native `tsnet.ListenTLS` listener on fixed
+TCP port 443. It does not proxy the loopback server and it does not consume
+forwarded identity or capability headers. Its router exposes only:
+
+- `POST /api/v1/study/sessions` (create or resume); and
+- `POST /api/v1/study/sessions/{session_id}/sync`.
+
+Study GET, operator commands, vocabulary routes, `/healthz`, and `/version`
+remain loopback-only. Every Tailnet request performs a fresh LocalAPI `WhoIs`
+lookup using the native connection's exact remote address before routing or body
+decoding.
+
+The state directory is an identity-bearing secret. Before starting Lexinet,
+provision and enroll it outside this repository, make it a real directory owned
+by the service's effective user with mode `0700`, and keep it on persistent
+storage. Native startup rejects symlinks, ownership/mode mismatches, and ambient
+Tailscale enrollment or control-plane variables. Do not put auth keys, OAuth
+credentials, workload tokens, or other enrollment secrets in Git, config,
+environment variables, command arguments, URLs, logs, or diagnostics.
+
+Choose exactly one Tailnet study authentication mode. Node-capability mode uses
+transport identity only and requires the caller node to have exactly one tag,
+equal to the configured tag. The application capability must use a domain the
+operator controls; the reserved `.example` values below are placeholders and
+must be replaced:
+
+```toml
+[service]
+tailnet_enabled = true
+tailnet_hostname = "lexinet"
+tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+mode = "tailnet_node"
+required_node_tag = "tag:replace-with-panel-study-tag"
+application_capability = "operator-controlled.example/cap/lexinet-study-v1"
+allowed_profile_refs = ["replace.with.profile"]
+```
+
+The matching Tailnet policy grant is connection-scoped. The source panel node
+must be enrolled with only the configured source tag; the destination tag and
+profile below are also placeholders:
+
+```jsonc
+{
+  "grants": [
+    {
+      "src": ["tag:replace-with-panel-study-tag"],
+      "dst": ["tag:replace-with-lexinet-study-tag"],
+      "ip": ["tcp:443"],
+      "app": {
+        "operator-controlled.example/cap/lexinet-study-v1": [
+          {
+            "operations": ["create_or_resume", "sync"],
+            "profile_refs": ["replace.with.profile"]
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Lexinet intersects every grant object with its local create/resume-and-sync
+operation ceiling and `allowed_profile_refs`. Separate objects stay separate;
+their operation/profile sets are not combined into a broader cross-product.
+
+Scoped-token mode still requires fresh native `WhoIs` transport identity, but
+authorization comes from one owner-only token file and a separately provisioned
+nonsecret subject UUID. The subject UUID is the persisted identity; it must not
+be derived from token bytes. Omit all node-mode fields:
+
+```toml
+[service]
+tailnet_enabled = true
+tailnet_hostname = "lexinet"
+tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+mode = "scoped_token"
+allowed_profile_refs = ["replace.with.profile"]
+scoped_token_subject_id = "11111111-1111-1111-1111-111111111111" # replace
+scoped_token_file = "/run/secrets/lexinet-study-token"
+```
+
+The absolute token file must be regular, owned by the effective service user,
+and mode `0400` or `0600`. Lexinet reads it once before migrations, retains only
+its SHA-256 digest, and never re-reads it while serving. Rotate or revoke it by
+stopping/isolating the service, atomically installing a replacement owner-only
+file (and a new subject UUID when a new persistent principal is intended), then
+restarting. Deleting the file after startup does not revoke the in-memory
+digest. In node mode, remove the app grant or required tag, wait for policy
+propagation, and verify that the next request is rejected; each request is
+re-evaluated rather than using cached identity/capability evidence.
+
+Production enablement remains gated on real, sanitized Tailnet evidence for a
+correctly tagged node, an untagged node, a wrong-tag node, live grant/tag
+revocation, and native certificate issuance/hostname/TLS handshake. MagicDNS
+and Tailnet HTTPS must be configured for the chosen hostname. The house-panel
+deployment must also make an explicit packaging choice between an official
+SHA-256-pinned ARM static archive and a pinned source-toolchain build. Unit tests
+do not satisfy these external gates. See
+[`docs/decisions/0003-scope-study-tailnet-access.md`](docs/decisions/0003-scope-study-tailnet-access.md)
+for the durable boundary decision.
 
 ### Search Strategy Configuration
 

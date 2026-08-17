@@ -15,18 +15,22 @@ lexinet must:
 3. Provide **powerful search** over names AND definitions/examples/notes through configurable server-side strategies, with the daily-driver default enabling fuzzy typo recall and a legacy strategy preserving fuzzy opt-in behavior.
 4. Expose a **network endpoint** (HTTP) AND ship a **scriptable, JSON-first CLI** built for agents (non-interactive, structured output, typed exit codes).
 
-It is delivered as a **single Go 1.23.x binary** that is both the HTTP service (`lexinet serve`) and the client (every other command), following the proven **loose_ends** pattern verbatim where possible.
+It is delivered as a **single Go 1.26.5 binary** that is both the HTTP service
+(`lexinet serve`) and the client (every other command), following the proven
+**loose_ends** pattern where its assumptions still fit. The embedded Tailnet
+transport is pinned to Tailscale v1.102.2.
 
 ---
 
 ## 2. Stack & conventions (locked to the loose_ends pattern)
 
-Grounded by reading the live `loose-ends-trial-2` source. All of these are reused, not reinvented:
+Grounded by reading the live `loose-ends-trial-2` source. These are the retained
+baseline conventions plus the deliberately separate Tailnet study boundary:
 
-- **Language/build**: one Go 1.23.x module, `cmd/lexinet/main.go` + `internal/{cli,config,server,storage,tailnet,model}` + `migrations/` (embedded via `embed.go`). Matches the sandbox toolchain (Go 1.23.4 + Postgres + ripgrep).
-- **Router**: `chi/v5`. `/healthz` and `/version` registered **outside** the auth group. Everything else in an `r.Group` guarded by `requireBearer(token)` **only when** `service.auth_token` is non-empty (constant-time `subtle.ConstantTimeCompare` of `"Bearer "+token`).
+- **Language/build**: one Go 1.26.5 module, `cmd/lexinet/main.go` + `internal/{cli,config,server,storage,studyauth,studysession,tailnet,model}` + `migrations/` (embedded via `embed.go`). The pinned native Tailnet dependency is Tailscale v1.102.2.
+- **Routers**: `chi/v5`. The loopback router registers `/healthz` and `/version` outside the optional legacy bearer group, and mounts `study.v1` behind a dedicated fail-closed operator bearer. The native Tailnet router is a separate handler with no vocabulary `Store`; it exposes only study create/resume and sync after fresh transport-derived authentication.
 - **DB**: `pgx/v5` (`pgxpool`), `application_name="lexinet"`. **`golang-migrate`** with embedded `iofs` migrations; `postgres://`→`pgx5://` DSN rewrite. `lexinet migrate` is self-bootstrapping.
-- **Listeners**: `http.Server` on `service.listen_loopback` (**default `127.0.0.1:17892`** — distinct from loose_ends' `17890` and MC's `18792` to avoid collision on the shared sandbox host) and, when `service.tailnet_enabled`, **additionally** on a `tsnet.Listener` (`service.tailnet_hostname` default `lexinet`). One handler, two listeners.
+- **Listeners**: `http.Server` on `service.listen_loopback` (**default `127.0.0.1:17892`** — distinct from loose_ends' `17890` and MC's `18792` to avoid collision on the shared sandbox host) and, when `service.tailnet_enabled`, a separate native `tsnet.ListenTLS("tcp", ":443")` listener (`service.tailnet_hostname` default `lexinet`). There is no raw-TCP, Funnel, proxy-header, cleartext, or shared-handler path.
 - **Config**: TOML at `os.UserConfigDir()/lexinet/config.toml`, overridable with `LEXINET_CONFIG`. `Default()` / `LoadFile()` (auto-creates `0600` on first run) / `Save()` (writes `0600`) / `Set(key,value)` exactly like loose_ends. Resolution precedence **flag → env → config → built-in default**.
 - **JSON envelope**: requests/responses `application/json`; decode with `DisallowUnknownFields()` (unknown field → `400 BAD_REQUEST`). Error envelope (unchanged from loose_ends):
   ```json
@@ -449,13 +453,90 @@ id_length = 12
 [service]
 listen_loopback   = "127.0.0.1:17892"
 auth_token        = ""
-tailnet_enabled   = true
+tailnet_enabled   = false
 tailnet_hostname  = "lexinet"
 tailnet_state_dir = "~/.config/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+mode = ""
+required_node_tag = ""
+application_capability = ""
+allowed_profile_refs = []
+scoped_token_subject_id = ""
+scoped_token_file = ""
+
 [service.database]
 dsn = "postgres://lexinet@127.0.0.1:5432/lexinet?sslmode=disable"
 ```
 **Token precedence:** `--token-file` → `LEXINET_TOKEN_FILE` → `server.token_file` → `LEXINET_TOKEN` → `server.token`. Token read at call time, never logged, `***redacted***` in `config show` (which warns if `LEXINET_TOKEN` is set). Sent as `Authorization: Bearer <token>`. **Endpoint precedence:** `--endpoint` → `LEXINET_URL` → `server.url` → default.
+
+### Tailnet study boundary
+
+Tailnet is disabled by default. Enabling it requires a persistent, pre-enrolled
+`tailnet_state_dir` that is a real directory, owned by the service's effective
+user, and mode `0700`. Enrollment and certificate state are provisioned outside
+Git and outside the Lexinet process. Auth keys, OAuth/workload credentials,
+alternate control-plane inputs, and debug environment files never enter config,
+environment variables, command arguments, URLs, logs, or diagnostics. Startup
+rejects supported ambient Tailscale enrollment/control-plane variables and
+fails before migrations when the transport or authentication policy is invalid.
+
+The Tailnet router is native TLS on fixed TCP 443 and exposes only
+`POST /api/v1/study/sessions` and
+`POST /api/v1/study/sessions/{session_id}/sync`. Study GET, the operator CLI,
+vocabulary APIs, `/healthz`, and `/version` remain loopback-only. Every request
+performs a fresh LocalAPI `WhoIs` lookup against the exact native connection
+address; forwarded identity, capability, and bearer-derived identity are not
+accepted.
+
+Authentication modes are mutually exclusive:
+
+- **`tailnet_node`** requires the caller node to carry exactly one configured
+  singleton tag and a connection-scoped app capability named
+  `<operator-controlled-domain>/cap/lexinet-study-v1`. Each capability object
+  contains exactly `operations` and `profile_refs`. Lexinet intersects each
+  object with its local `create_or_resume`/`sync` and configured-profile ceiling
+  without combining separate objects into a broader cross-product. The stable
+  Tailscale node ID is mapped through the frozen two-stage UUIDv5 derivation;
+  raw identity attributes do not persist.
+- **`scoped_token`** still requires a successful fresh `WhoIs`, then requires
+  exactly one bearer matching an absolute, regular, effective-user-owned `0400`
+  or `0600` file. The file is read once before migrations and only its SHA-256
+  digest is retained. A separately provisioned nonsecret subject UUID supplies
+  persistent identity and is never derived from the token. Tag and app-cap
+  fields are forbidden in this mode.
+
+The reserved `.example`, tag, profile, and UUID values in deployment examples
+are placeholders, never production defaults. The connection-scoped policy
+shape is:
+
+```jsonc
+{
+  "grants": [
+    {
+      "src": ["tag:replace-with-panel-study-tag"],
+      "dst": ["tag:replace-with-lexinet-study-tag"],
+      "ip": ["tcp:443"],
+      "app": {
+        "operator-controlled.example/cap/lexinet-study-v1": [
+          {
+            "operations": ["create_or_resume", "sync"],
+            "profile_refs": ["replace.with.profile"]
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Node-mode revocation removes the app grant or required tag and verifies denial
+after policy propagation; fresh `WhoIs` prevents application-level capability
+caching. Token-mode revocation stops or isolates the service, atomically
+installs a replacement owner-only file (and new subject UUID when a new
+principal is intended), and restarts; deleting the file after startup does not
+erase the retained digest. A suspect embedded-node identity is revoked through
+Tailnet administration.
 
 ### Output contract (agent-friendly)
 - `--json` first-class on every command (single pretty object via `SetIndent("", "  ")`); `--compact` one-line; `--jsonl` streams one object per line for `search`/`list`/`traverse`.
@@ -481,7 +562,22 @@ lexinet traverse "$id" --relation is_a --depth 3 --json
 
 ## 8. Deployment
 
-Mirrors loose_ends: `Dockerfile` (Go 1.23.4 build), `deploy/docker/{docker-compose.yml,config.toml,README.md}`, a launchd plist and/or systemd unit. Single binary, embedded migrations, self-bootstrapping `migrate`. Optional `tsnet` exposure at `lexinet.<tailnet>.ts.net:17892`; bearer `auth_token` is defense-in-depth on top of the tailnet boundary.
+The `Dockerfile` builds with Go 1.26.5; deployment artifacts remain under
+`deploy/docker/{docker-compose.yml,config.toml,README.md}` with optional launchd
+or systemd composition. The single binary retains embedded, self-bootstrapping
+migrations. The default deployment publishes only loopback HTTP port 17892 and
+keeps Tailnet disabled.
+
+Production Tailnet enablement uses the embedded native-TLS listener at the
+MagicDNS hostname on port 443. It does not use Tailscale Serve, a raw-TCP proxy,
+or the loopback bearer as Tailnet identity. Before release, sanitized real-node
+evidence must cover a correctly tagged caller, an untagged caller, a wrong-tag
+caller, live grant/tag revocation, and native certificate issuance, hostname
+validation, and TLS handshake. MagicDNS and Tailnet HTTPS are external
+prerequisites. The house-panel consumer must also make an explicit packaging
+choice between an official SHA-256-pinned ARM static Tailscale archive and a
+pinned source-toolchain build. Unit tests do not close any of these gates, so
+Step 5 remains incomplete until the evidence and packaging decision exist.
 
 ---
 
@@ -491,7 +587,9 @@ Mirrors loose_ends: `Dockerfile` (Go 1.23.4 build), `deploy/docker/{docker-compo
 - **Edge weights/confidence** — relationships carry an optional free-text `note` only.
 - **Controlled vocabularies** for `domain`, `notes.kind`, `definitions.register` — free-text at v1; normalization is a later facet.
 - **Accent/whitespace normalization** beyond citext case-folding — the app trims input; deeper normalization is deferred. Agents passing dirty input may miss exact resolution.
-- **Multi-user auth / RBAC** — single shared bearer token only.
+- **General multi-user auth / RBAC.** The loopback operator still uses one
+  dedicated bearer. Tailnet study node capabilities/scoped tokens are a narrow
+  appliance boundary, not a general user or vocabulary authorization system.
 
 ---
 

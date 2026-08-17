@@ -18,7 +18,21 @@ listen_loopback = "0.0.0.0:17892"
 auth_token = ""
 tailnet_enabled = false
 tailnet_hostname = "lexinet"
+# Tailnet enablement requires persistent, pre-enrolled state that is owned by
+# the effective service user, mode 0700, and bind-mounted at this exact path.
+# This disabled Compose profile intentionally does not mount or enroll it.
 tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+# Configure exactly one mode before enabling Tailnet. Keep credentials out of
+# this file. See README.md for mutually exclusive, redacted node-capability and
+# scoped-token examples.
+mode = ""
+required_node_tag = ""
+application_capability = ""
+allowed_profile_refs = []
+scoped_token_subject_id = ""
+scoped_token_file = ""
 
 [service.database]
 dsn = "postgres://lexinet:lexinet@postgres:5432/lexinet?sslmode=disable"
