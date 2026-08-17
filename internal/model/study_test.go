@@ -203,6 +203,29 @@ func TestStudyReceiptJSONOmitsInternalPrincipalAndOwnership(t *testing.T) {
 			t.Fatalf("creation receipt exposed internal ownership field %q: %s", forbidden, encoded)
 		}
 	}
+
+	eventEncoded, err := json.Marshal(StudyEventReceipt{
+		ClientStreamID:                 uuid.MustParse("44444444-4444-4444-8444-444444444444"),
+		ClientSequence:                 1,
+		OriginatingStudyFlushReceiptID: uuid.MustParse("55555555-5555-4555-8555-555555555555"),
+		LearnerProfileID:               uuid.MustParse("66666666-6666-4666-8666-666666666666"),
+		StudySessionID:                 uuid.MustParse("77777777-7777-4777-8777-777777777777"),
+		Disposition:                    StudyEventReceiptDispositionTerminalRejected,
+		Code:                           StudyEventReceiptCodeTransitionInvalid,
+	})
+	if err != nil {
+		t.Fatalf("marshal event receipt: %v", err)
+	}
+	for _, forbidden := range []string{
+		"44444444-4444-4444-8444-444444444444",
+		"55555555-5555-4555-8555-555555555555",
+		"66666666-6666-4666-8666-666666666666",
+		"77777777-7777-4777-8777-777777777777",
+	} {
+		if strings.Contains(string(eventEncoded), forbidden) {
+			t.Fatalf("event receipt exposed internal ownership/batch value %q: %s", forbidden, eventEncoded)
+		}
+	}
 }
 
 func TestStudySchemaErrorRedactsInvalidReferenceCanary(t *testing.T) {

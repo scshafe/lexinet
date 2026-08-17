@@ -19,42 +19,29 @@ func (r *Repository) UpsertAcronymLink(ctx context.Context, input model.UpsertAc
 	if acronymRef == "" || expansionRef == "" {
 		return nil, fmt.Errorf("upsert acronym link: acronym and expansion are required")
 	}
-	tx, err := r.db.Begin(ctx)
+	var link *model.AcronymLink
+	err := r.withLockedCurrentIdeas(ctx, "acronym_link_upsert", []currentIdeaTarget{currentIdeaRef(acronymRef), currentIdeaRef(expansionRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		if ids[0] == ids[1] {
+			return fmt.Errorf("upsert acronym link: acronym and expansion cannot be the same idea")
+		}
+		// Two statements on purpose: a data-modifying CTE's rows are invisible to
+		// the outer SELECT's snapshot in the same statement. The locked transaction
+		// sees its own completed first statement, so the follow-up read is stable.
+		var linkID uuid.UUID
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO acronym_links (acronym_idea_id, expansion_idea_id, note)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (acronym_idea_id, expansion_idea_id)
+			DO UPDATE SET note = EXCLUDED.note
+			RETURNING id`, ids[0], ids[1], input.Note).Scan(&linkID); err != nil {
+			return err
+		}
+		var err error
+		link, err = scanAcronymLink(tx.QueryRow(ctx, acronymLinkSelectPrefix+`
+			WHERE al.id = $1`, linkID))
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	acronymID, err := resolveIdeaID(ctx, tx, acronymRef)
-	if err != nil {
-		return nil, err
-	}
-	expansionID, err := resolveIdeaID(ctx, tx, expansionRef)
-	if err != nil {
-		return nil, err
-	}
-	if acronymID == expansionID {
-		return nil, fmt.Errorf("upsert acronym link: acronym and expansion cannot be the same idea")
-	}
-	// Two statements on purpose: a data-modifying CTE's rows are INVISIBLE to the outer
-	// SELECT's snapshot in the same statement (reading the table via JOIN found zero rows,
-	// surfacing a bogus not-found on every create). The tx sees its own completed first
-	// statement, so the follow-up SELECT by id is race-free.
-	var linkID uuid.UUID
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO acronym_links (acronym_idea_id, expansion_idea_id, note)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (acronym_idea_id, expansion_idea_id)
-		DO UPDATE SET note = EXCLUDED.note
-		RETURNING id`, acronymID, expansionID, input.Note).Scan(&linkID); err != nil {
-		return nil, err
-	}
-	link, err := scanAcronymLink(tx.QueryRow(ctx, acronymLinkSelectPrefix+`
-		WHERE al.id = $1`, linkID))
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return link, nil

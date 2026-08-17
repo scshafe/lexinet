@@ -12,12 +12,16 @@ DROP TRIGGER IF EXISTS study_card_identity_redirects_reject_cycle ON study_card_
 DROP TABLE IF EXISTS study_card_identity_redirects;
 DROP FUNCTION IF EXISTS study_reject_card_identity_redirect_cycle();
 
+DROP TRIGGER IF EXISTS study_event_receipts_append_only ON study_event_receipts;
+DROP TRIGGER IF EXISTS study_event_receipts_validate_origin_batch ON study_event_receipts;
+DROP TRIGGER IF EXISTS study_event_receipts_validate_binding ON study_event_receipts;
+DROP TABLE IF EXISTS study_event_receipts;
+
+DROP TRIGGER IF EXISTS study_flush_receipts_validate_origin_batch ON study_flush_receipts;
 DROP TRIGGER IF EXISTS study_flush_receipts_append_only ON study_flush_receipts;
 DROP TABLE IF EXISTS study_flush_receipts;
 
-DROP TRIGGER IF EXISTS study_event_receipts_append_only ON study_event_receipts;
-DROP TRIGGER IF EXISTS study_event_receipts_validate_binding ON study_event_receipts;
-DROP TABLE IF EXISTS study_event_receipts;
+DROP FUNCTION IF EXISTS study_validate_event_receipt_origin_batch();
 DROP FUNCTION IF EXISTS study_validate_event_receipt_binding();
 
 DROP TRIGGER IF EXISTS study_events_append_only ON study_events;
@@ -52,3 +56,9 @@ DROP FUNCTION IF EXISTS study_reject_append_only_mutation();
 DROP FUNCTION IF EXISTS study_topic_refs_are_valid(TEXT[]);
 DROP FUNCTION IF EXISTS study_text_array_is_strictly_sorted_unique(TEXT[]);
 DROP FUNCTION IF EXISTS study_uuid_array_is_strictly_sorted_unique(UUID[]);
+
+ALTER TABLE ideas DROP CONSTRAINT IF EXISTS ideas_merged_identity_shape;
+ALTER TABLE ideas DROP CONSTRAINT IF EXISTS ideas_merged_into_id_fkey;
+ALTER TABLE ideas
+    ADD CONSTRAINT ideas_merged_into_id_fkey
+    FOREIGN KEY (merged_into_id) REFERENCES ideas(id) ON DELETE SET NULL;

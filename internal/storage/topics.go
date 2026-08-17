@@ -95,15 +95,44 @@ func (r *Repository) UpdateTopic(ctx context.Context, ref string, input model.Up
 }
 
 func (r *Repository) DeleteTopic(ctx context.Context, ref string) error {
-	tx, err := r.db.Begin(ctx)
+	for attempt := 0; attempt < currentIdeaMutationAttempts; attempt++ {
+		err := r.deleteTopicOnce(ctx, ref)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errCurrentIdeaChanged) && !isRetryableIdeaTransactionError(err) {
+			return err
+		}
+	}
+	return newStudyStorageError(model.StudyErrorCodeServiceUnavailable, "topic deletion could not acquire stable eligibility locks", "topic_delete", true, errCurrentIdeaChanged)
+}
+
+func (r *Repository) deleteTopicOnce(ctx context.Context, ref string) error {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-
 	topicID, err := resolveTopicID(ctx, tx, ref)
 	if err != nil {
 		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT idea_id FROM idea_topics WHERE topic_id = $1 ORDER BY idea_id`, topicID)
+	if err != nil {
+		return err
+	}
+	ideaIDs, err := collectUUIDRows(rows)
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if r.ideaMutationAfterResolve != nil && len(ideaIDs) > 0 {
+		r.ideaMutationAfterResolve("topic_delete", append([]uuid.UUID(nil), ideaIDs...))
+	}
+	if len(ideaIDs) > 0 {
+		if err := lockAndValidateCurrentIdeas(ctx, tx, ideaIDs); err != nil {
+			return err
+		}
 	}
 	tag, err := tx.Exec(ctx, `DELETE FROM topics WHERE id = $1`, topicID)
 	if err != nil {
@@ -116,55 +145,36 @@ func (r *Repository) DeleteTopic(ctx context.Context, ref string) error {
 }
 
 func (r *Repository) AssignTopic(ctx context.Context, ideaRef, topicRef string) (*model.Topic, error) {
-	tx, err := r.db.Begin(ctx)
+	var topic *model.Topic
+	err := r.withLockedCurrentIdeas(ctx, "topic_assign", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		topicID, err := resolveTopicID(ctx, tx, topicRef)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO idea_topics (idea_id, topic_id)
+			VALUES ($1, $2)
+			ON CONFLICT (idea_id, topic_id) DO NOTHING`, ids[0], topicID); err != nil {
+			return err
+		}
+		topic, err = getTopicByID(ctx, tx, topicID)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return nil, err
-	}
-	topicID, err := resolveTopicID(ctx, tx, topicRef)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO idea_topics (idea_id, topic_id)
-		VALUES ($1, $2)
-		ON CONFLICT (idea_id, topic_id) DO NOTHING`, ideaID, topicID); err != nil {
-		return nil, err
-	}
-	topic, err := getTopicByID(ctx, tx, topicID)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return topic, nil
 }
 
 func (r *Repository) UnassignTopic(ctx context.Context, ideaRef, topicRef string) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
+	return r.withLockedCurrentIdeas(ctx, "topic_unassign", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		topicID, err := resolveTopicID(ctx, tx, topicRef)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM idea_topics WHERE idea_id = $1 AND topic_id = $2`, ids[0], topicID)
 		return err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return err
-	}
-	topicID, err := resolveTopicID(ctx, tx, topicRef)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM idea_topics WHERE idea_id = $1 AND topic_id = $2`, ideaID, topicID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	})
 }
 
 func (r *Repository) ListTopicsByIdeaRef(ctx context.Context, ideaRef string) ([]model.TopicSummary, error) {

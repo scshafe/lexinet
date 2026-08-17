@@ -446,19 +446,20 @@ type StudyCreationReceipt struct {
 // StudySession is one immutable finite cycle plus its optimistic lifecycle
 // state. Successor identity is derived by the unique predecessor link.
 type StudySession struct {
-	ID                        uuid.UUID                 `json:"session_id"`
-	LearnerProfileID          uuid.UUID                 `json:"learner_profile_id"`
-	Scope                     StudyNormalizedScope      `json:"scope"`
-	Lifecycle                 StudySessionLifecycle     `json:"lifecycle"`
-	CorpusSHA256              string                    `json:"corpus_sha256"`
-	Scheduler                 *StudySchedulerProvenance `json:"scheduler"`
-	PredecessorStudySessionID *uuid.UUID                `json:"predecessor_session_id"`
-	SuccessorStudySessionID   *uuid.UUID                `json:"successor_session_id"`
-	ProfileIngestionHighWater int64                     `json:"profile_ingestion_high_water"`
-	StateVersion              int64                     `json:"state_version"`
-	CreatedAt                 time.Time                 `json:"created_at"`
-	UpdatedAt                 time.Time                 `json:"updated_at"`
-	TerminalizedAt            *time.Time                `json:"terminalized_at"`
+	ID                                uuid.UUID                 `json:"session_id"`
+	LearnerProfileID                  uuid.UUID                 `json:"learner_profile_id"`
+	Scope                             StudyNormalizedScope      `json:"scope"`
+	Lifecycle                         StudySessionLifecycle     `json:"lifecycle"`
+	CorpusSHA256                      string                    `json:"corpus_sha256"`
+	Scheduler                         *StudySchedulerProvenance `json:"scheduler"`
+	PredecessorStudySessionID         *uuid.UUID                `json:"predecessor_session_id"`
+	SuccessorStudySessionID           *uuid.UUID                `json:"successor_session_id"`
+	ProfileIngestionHighWater         int64                     `json:"profile_ingestion_high_water"`
+	StateVersion                      int64                     `json:"state_version"`
+	CreatedAt                         time.Time                 `json:"created_at"`
+	UpdatedAt                         time.Time                 `json:"updated_at"`
+	TerminalizedAt                    *time.Time                `json:"terminalized_at"`
+	TerminalProfileIngestionHighWater *int64                    `json:"terminal_profile_ingestion_high_water"`
 }
 
 // StudySessionLifecycleEvent is one append-only audited state transition.
@@ -551,6 +552,7 @@ type StudyEventIDBinding struct {
 type StudyEventReceipt struct {
 	ClientStreamID                   uuid.UUID                    `json:"-"`
 	ClientSequence                   int64                        `json:"client_sequence"`
+	OriginatingStudyFlushReceiptID   uuid.UUID                    `json:"-"`
 	LearnerProfileID                 uuid.UUID                    `json:"-"`
 	StudySessionID                   uuid.UUID                    `json:"-"`
 	StudySessionItemID               uuid.UUID                    `json:"-"`
@@ -562,6 +564,7 @@ type StudyEventReceipt struct {
 	EventIDBindingMatchesInput       bool                         `json:"-"`
 	Disposition                      StudyEventReceiptDisposition `json:"disposition"`
 	Code                             StudyEventReceiptCode        `json:"code"`
+	TerminalFailureClientSequence    *int64                       `json:"-"`
 	CanonicalStudyEventID            *uuid.UUID                   `json:"canonical_event_id"`
 	CanonicalProfileIngestionOrdinal *int64                       `json:"profile_ingestion_ordinal"`
 	CreatedAt                        time.Time                    `json:"-"`

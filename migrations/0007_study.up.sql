@@ -96,6 +96,7 @@ CREATE TABLE study_sessions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     study_session_terminalized_at TIMESTAMPTZ,
+    study_session_terminal_profile_ingestion_high_water BIGINT,
     CONSTRAINT study_sessions_selector_is_object CHECK (jsonb_typeof(normalized_corpus_selector::jsonb) = 'object'),
     CONSTRAINT study_sessions_selector_bounded CHECK (octet_length(normalized_corpus_selector) <= 8192),
     CONSTRAINT study_sessions_selector_sha256_format CHECK (normalized_corpus_selector_sha256 ~ '^[0-9a-f]{64}$'),
@@ -142,6 +143,13 @@ CREATE TABLE study_sessions (
     CONSTRAINT study_sessions_terminal_time_consistent CHECK (
         (study_session_lifecycle IN ('active', 'waiting_for_corpus') AND study_session_terminalized_at IS NULL)
         OR (study_session_lifecycle IN ('completed', 'superseded_empty', 'abandoned') AND study_session_terminalized_at IS NOT NULL)
+    ),
+    CONSTRAINT study_sessions_terminal_high_water_consistent CHECK (
+        (study_session_lifecycle IN ('active', 'waiting_for_corpus')
+            AND study_session_terminal_profile_ingestion_high_water IS NULL)
+        OR (study_session_lifecycle IN ('completed', 'superseded_empty', 'abandoned')
+            AND study_session_terminal_profile_ingestion_high_water IS NOT NULL
+            AND study_session_terminal_profile_ingestion_high_water >= 0)
     ),
     CONSTRAINT study_sessions_id_profile_unique UNIQUE (study_session_id, learner_profile_id),
     CONSTRAINT study_sessions_scope_tuple_unique UNIQUE (
@@ -196,6 +204,7 @@ COMMENT ON COLUMN study_sessions.study_session_state_version IS 'Optimistic comp
 COMMENT ON COLUMN study_sessions.created_at IS 'UTC creation time.';
 COMMENT ON COLUMN study_sessions.updated_at IS 'UTC time of the latest mutable state change.';
 COMMENT ON COLUMN study_sessions.study_session_terminalized_at IS 'Audited UTC transition time for terminal lifecycle states.';
+COMMENT ON COLUMN study_sessions.study_session_terminal_profile_ingestion_high_water IS 'Exact accepted profile event prefix captured while profile and session locks were held at terminalization; distinct from scheduler input provenance.';
 
 CREATE TRIGGER study_sessions_set_updated_at
     BEFORE UPDATE ON study_sessions
@@ -475,29 +484,18 @@ CREATE TABLE study_event_id_bindings (
     ),
     CONSTRAINT study_event_id_bindings_session_profile_fk FOREIGN KEY (study_session_id, learner_profile_id)
         REFERENCES study_sessions(study_session_id, learner_profile_id) ON DELETE RESTRICT,
-    CONSTRAINT study_event_id_bindings_item_identity_fk FOREIGN KEY (
-        study_session_item_id,
-        study_session_id,
-        study_card_identity,
-        source_content_sha256
-    ) REFERENCES study_session_items (
-        study_session_item_id,
-        study_session_id,
-        study_card_identity,
-        source_content_sha256
-    ) ON DELETE RESTRICT,
     CONSTRAINT study_event_id_bindings_stream_profile_fk FOREIGN KEY (first_client_stream_id, learner_profile_id)
         REFERENCES study_client_streams(client_stream_id, learner_profile_id) ON DELETE RESTRICT
 );
 
-COMMENT ON TABLE study_event_id_bindings IS 'Global immutable binding of every first-seen submitted event UUID, including terminal rejections, to one payload and study scope.';
+COMMENT ON TABLE study_event_id_bindings IS 'Global immutable binding of every first-seen submitted event UUID, including terminal rejections, to its payload and untrusted submitted claims within an owned learner/session.';
 COMMENT ON COLUMN study_event_id_bindings.client_event_id IS 'Globally unique client event UUID authority.';
 COMMENT ON COLUMN study_event_id_bindings.bound_event_payload_sha256 IS 'First-seen canonical payload digest; changed reuse is STUDY_EVENT_ID_CONFLICT.';
 COMMENT ON COLUMN study_event_id_bindings.learner_profile_id IS 'Learner scope permanently bound to the UUID.';
 COMMENT ON COLUMN study_event_id_bindings.study_session_id IS 'Session scope permanently bound to the UUID.';
-COMMENT ON COLUMN study_event_id_bindings.study_session_item_id IS 'Issued item permanently bound to the UUID.';
-COMMENT ON COLUMN study_event_id_bindings.study_card_identity IS 'Historical card identity permanently bound to the UUID.';
-COMMENT ON COLUMN study_event_id_bindings.source_content_sha256 IS 'Issued content digest permanently bound to the UUID.';
+COMMENT ON COLUMN study_event_id_bindings.study_session_item_id IS 'Untrusted submitted item claim retained even when exact issued-item validation fails.';
+COMMENT ON COLUMN study_event_id_bindings.study_card_identity IS 'Untrusted submitted historical-card claim retained even when validation fails.';
+COMMENT ON COLUMN study_event_id_bindings.source_content_sha256 IS 'Untrusted submitted content-digest claim retained even when validation fails.';
 COMMENT ON COLUMN study_event_id_bindings.first_client_stream_id IS 'Stream on which the UUID was first terminally adjudicated.';
 COMMENT ON COLUMN study_event_id_bindings.first_client_sequence IS 'Sequence on which the UUID was first terminally adjudicated.';
 COMMENT ON COLUMN study_event_id_bindings.event_id_bound_at IS 'UTC first terminal adjudication time.';
@@ -648,6 +646,7 @@ CREATE TRIGGER study_events_append_only
 CREATE TABLE study_event_receipts (
     client_stream_id UUID NOT NULL,
     client_sequence BIGINT NOT NULL,
+    originating_study_flush_receipt_id UUID NOT NULL,
     learner_profile_id UUID NOT NULL,
     study_session_id UUID NOT NULL,
     study_session_item_id UUID NOT NULL,
@@ -659,11 +658,20 @@ CREATE TABLE study_event_receipts (
     event_id_binding_matches_input BOOLEAN NOT NULL,
     event_receipt_disposition TEXT NOT NULL,
     event_receipt_code TEXT NOT NULL,
+    terminal_failure_client_sequence BIGINT,
     canonical_study_event_id UUID,
     canonical_profile_ingestion_ordinal BIGINT,
     study_event_receipt_created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_stream_id, client_sequence),
+    CONSTRAINT study_event_receipts_origin_sequence_unique UNIQUE (
+        client_stream_id,
+        originating_study_flush_receipt_id,
+        client_sequence
+    ),
     CONSTRAINT study_event_receipts_sequence_positive CHECK (client_sequence >= 1),
+    CONSTRAINT study_event_receipts_origin_id_nonzero CHECK (
+        originating_study_flush_receipt_id <> '00000000-0000-0000-0000-000000000000'
+    ),
     CONSTRAINT study_event_receipts_content_sha256_format CHECK (source_content_sha256 ~ '^[0-9a-f]{64}$'),
     CONSTRAINT study_event_receipts_bound_sha256_format CHECK (bound_event_payload_sha256 ~ '^[0-9a-f]{64}$'),
     CONSTRAINT study_event_receipts_payload_sha256_format CHECK (normalized_event_payload_sha256 ~ '^[0-9a-f]{64}$'),
@@ -677,6 +685,13 @@ CREATE TABLE study_event_receipts (
         'STUDY_RATING_VOID_TARGET_INVALID',
         'STUDY_CONTENT_REVISION_MISMATCH'
     )),
+    CONSTRAINT study_event_receipts_terminal_failure_shape CHECK (
+        (event_receipt_disposition = 'terminal_rejected'
+            AND terminal_failure_client_sequence IS NOT NULL
+            AND terminal_failure_client_sequence >= 1)
+        OR (event_receipt_disposition <> 'terminal_rejected'
+            AND terminal_failure_client_sequence IS NULL)
+    ),
     CONSTRAINT study_event_receipts_canonical_shape CHECK (
         (event_receipt_disposition = 'accepted'
             AND event_receipt_code = 'STUDY_EVENT_ACCEPTED'
@@ -700,26 +715,35 @@ CREATE TABLE study_event_receipts (
             AND canonical_profile_ingestion_ordinal IS NULL)
     ),
     CONSTRAINT study_event_receipts_id_conflict_shape CHECK (
-        (event_receipt_code = 'STUDY_EVENT_ID_CONFLICT' AND NOT event_id_binding_matches_input)
-        OR (event_receipt_code <> 'STUDY_EVENT_ID_CONFLICT' AND event_id_binding_matches_input)
+        (event_receipt_disposition <> 'terminal_rejected'
+            AND event_id_binding_matches_input)
+        OR (event_receipt_disposition = 'terminal_rejected'
+            AND terminal_failure_client_sequence <> client_sequence)
+        OR (event_receipt_disposition = 'terminal_rejected'
+            AND event_receipt_code = 'STUDY_EVENT_ID_CONFLICT'
+            AND terminal_failure_client_sequence = client_sequence
+            AND NOT event_id_binding_matches_input)
+        OR (event_receipt_disposition = 'terminal_rejected'
+            AND event_receipt_code <> 'STUDY_EVENT_ID_CONFLICT'
+            AND terminal_failure_client_sequence = client_sequence
+            AND event_id_binding_matches_input)
     ),
     CONSTRAINT study_event_receipts_stream_profile_fk FOREIGN KEY (client_stream_id, learner_profile_id)
         REFERENCES study_client_streams(client_stream_id, learner_profile_id) ON DELETE RESTRICT,
     CONSTRAINT study_event_receipts_session_profile_fk FOREIGN KEY (study_session_id, learner_profile_id)
         REFERENCES study_sessions(study_session_id, learner_profile_id) ON DELETE RESTRICT,
-    CONSTRAINT study_event_receipts_item_identity_fk FOREIGN KEY (
-        study_session_item_id,
-        study_session_id,
-        study_card_identity,
-        source_content_sha256
-    ) REFERENCES study_session_items (
-        study_session_item_id,
-        study_session_id,
-        study_card_identity,
-        source_content_sha256
-    ) ON DELETE RESTRICT,
     CONSTRAINT study_event_receipts_global_event_binding_fk FOREIGN KEY (client_event_id, bound_event_payload_sha256)
         REFERENCES study_event_id_bindings(client_event_id, bound_event_payload_sha256) ON DELETE RESTRICT,
+    CONSTRAINT study_event_receipts_terminal_failure_fk FOREIGN KEY (
+        client_stream_id,
+        originating_study_flush_receipt_id,
+        terminal_failure_client_sequence
+    ) REFERENCES study_event_receipts (
+        client_stream_id,
+        originating_study_flush_receipt_id,
+        client_sequence
+    )
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT study_event_receipts_canonical_event_fk FOREIGN KEY (
         canonical_study_event_id,
         learner_profile_id,
@@ -740,20 +764,37 @@ CREATE TABLE study_event_receipts (
 CREATE INDEX study_event_receipts_client_event_idx
     ON study_event_receipts (client_event_id, normalized_event_payload_sha256);
 
+CREATE INDEX study_event_receipts_origin_batch_idx
+    ON study_event_receipts (
+        client_stream_id,
+        originating_study_flush_receipt_id,
+        client_sequence
+    );
+
+CREATE UNIQUE INDEX study_event_receipts_one_terminal_cause_per_batch
+    ON study_event_receipts (
+        client_stream_id,
+        originating_study_flush_receipt_id
+    )
+    WHERE event_receipt_disposition = 'terminal_rejected'
+      AND terminal_failure_client_sequence = client_sequence;
+
 COMMENT ON TABLE study_event_receipts IS 'Immutable terminal adjudication for every consumed contiguous client stream sequence.';
 COMMENT ON COLUMN study_event_receipts.client_stream_id IS 'Durable client stream whose sequence was consumed.';
 COMMENT ON COLUMN study_event_receipts.client_sequence IS 'Consumed contiguous stream sequence.';
+COMMENT ON COLUMN study_event_receipts.originating_study_flush_receipt_id IS 'Immutable server batch identity for the sync suffix in which this sequence was first adjudicated; replay never rewrites it.';
 COMMENT ON COLUMN study_event_receipts.learner_profile_id IS 'Learner ownership bound to the durable stream and session.';
 COMMENT ON COLUMN study_event_receipts.study_session_id IS 'Session scope that prevents replay through a different session endpoint.';
-COMMENT ON COLUMN study_event_receipts.study_session_item_id IS 'Exact issued item named by the adjudicated input.';
-COMMENT ON COLUMN study_event_receipts.study_card_identity IS 'Exact historical card identity named by the adjudicated input.';
-COMMENT ON COLUMN study_event_receipts.source_content_sha256 IS 'Exact immutable issued content digest named by the input.';
+COMMENT ON COLUMN study_event_receipts.study_session_item_id IS 'Untrusted submitted item claim adjudicated at this sequence.';
+COMMENT ON COLUMN study_event_receipts.study_card_identity IS 'Untrusted submitted historical-card claim adjudicated at this sequence.';
+COMMENT ON COLUMN study_event_receipts.source_content_sha256 IS 'Untrusted submitted content-digest claim adjudicated at this sequence.';
 COMMENT ON COLUMN study_event_receipts.client_event_id IS 'Submitted event UUID, including rejected and semantic-duplicate inputs.';
 COMMENT ON COLUMN study_event_receipts.bound_event_payload_sha256 IS 'First-seen global UUID binding used to identify changed-input conflicts.';
 COMMENT ON COLUMN study_event_receipts.normalized_event_payload_sha256 IS 'Canonical payload digest bound to this sequence.';
 COMMENT ON COLUMN study_event_receipts.event_id_binding_matches_input IS 'Stored result of comparing the entire current input tuple with the immutable first-seen UUID binding.';
 COMMENT ON COLUMN study_event_receipts.event_receipt_disposition IS 'Accepted fact, semantic duplicate, or stable terminal rejection.';
 COMMENT ON COLUMN study_event_receipts.event_receipt_code IS 'Stable study.v1 adjudication code.';
+COMMENT ON COLUMN study_event_receipts.terminal_failure_client_sequence IS 'Causative rejected sequence in the same originating sync batch; self for the cause and either earlier or later for collateral suffix inputs.';
 COMMENT ON COLUMN study_event_receipts.canonical_study_event_id IS 'Accepted scheduler fact, including the original fact for a duplicate.';
 COMMENT ON COLUMN study_event_receipts.canonical_profile_ingestion_ordinal IS 'Original accepted fact ordinal; never allocated for rejection.';
 COMMENT ON COLUMN study_event_receipts.study_event_receipt_created_at IS 'UTC adjudication time.';
@@ -807,6 +848,12 @@ CREATE TABLE study_flush_receipts (
     study_session_state_version BIGINT NOT NULL,
     study_flush_receipt_issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT study_flush_receipts_sync_request_scope_unique UNIQUE (study_principal_id, study_session_id, sync_request_id),
+    CONSTRAINT study_flush_receipts_origin_scope_unique UNIQUE (
+        study_flush_receipt_id,
+        learner_profile_id,
+        study_session_id,
+        client_stream_id
+    ),
     CONSTRAINT study_flush_receipts_principal_valid CHECK (
         study_principal_id = 'operator'
         OR (
@@ -822,6 +869,8 @@ CREATE TABLE study_flush_receipts (
             AND last_client_sequence IS NOT NULL
             AND first_client_sequence >= 1
             AND last_client_sequence >= first_client_sequence
+            AND last_client_sequence - first_client_sequence + 1 <= 64
+            AND acknowledged_through_client_sequence = last_client_sequence
         )
     ),
     CONSTRAINT study_flush_receipts_ack_nonnegative CHECK (acknowledged_through_client_sequence >= 0),
@@ -844,8 +893,8 @@ COMMENT ON COLUMN study_flush_receipts.sync_request_id IS 'Client-generated sync
 COMMENT ON COLUMN study_flush_receipts.normalized_sync_request_sha256 IS 'Digest that makes changed-input sync UUID reuse an explicit conflict.';
 COMMENT ON COLUMN study_flush_receipts.study_session_id IS 'Session whose retained suffix was adjudicated.';
 COMMENT ON COLUMN study_flush_receipts.client_stream_id IS 'Durable stream advanced or observed by this sync.';
-COMMENT ON COLUMN study_flush_receipts.first_client_sequence IS 'First sequence in this sync, null for an empty suffix.';
-COMMENT ON COLUMN study_flush_receipts.last_client_sequence IS 'Last sequence in this sync, null for an empty suffix.';
+COMMENT ON COLUMN study_flush_receipts.first_client_sequence IS 'First newly adjudicated suffix sequence originated by this flush receipt; null when the sync added no suffix.';
+COMMENT ON COLUMN study_flush_receipts.last_client_sequence IS 'Last newly adjudicated suffix sequence originated by this flush receipt; null when the sync added no suffix.';
 COMMENT ON COLUMN study_flush_receipts.acknowledged_through_client_sequence IS 'Contiguous stream high-water after adjudication.';
 COMMENT ON COLUMN study_flush_receipts.profile_ingestion_high_water IS 'Accepted profile prefix after adjudication.';
 COMMENT ON COLUMN study_flush_receipts.study_session_state_version IS 'Session CAS version returned by the sync.';
@@ -854,6 +903,148 @@ COMMENT ON COLUMN study_flush_receipts.study_flush_receipt_issued_at IS 'Stable 
 CREATE TRIGGER study_flush_receipts_append_only
     BEFORE UPDATE OR DELETE ON study_flush_receipts
     FOR EACH ROW EXECUTE FUNCTION study_reject_append_only_mutation();
+
+ALTER TABLE study_event_receipts
+    ADD CONSTRAINT study_event_receipts_origin_scope_fk FOREIGN KEY (
+        originating_study_flush_receipt_id,
+        learner_profile_id,
+        study_session_id,
+        client_stream_id
+    ) REFERENCES study_flush_receipts (
+        study_flush_receipt_id,
+        learner_profile_id,
+        study_session_id,
+        client_stream_id
+    ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION study_validate_event_receipt_origin_batch()
+RETURNS trigger AS $$
+DECLARE
+    origin_id UUID;
+    origin_stream_id UUID;
+    suffix_first BIGINT;
+    suffix_last BIGINT;
+    flush_acknowledged_through BIGINT;
+    stream_adjudicated_through BIGINT;
+    previous_receipt_max_sequence BIGINT;
+    receipt_count BIGINT;
+    receipt_min_sequence BIGINT;
+    receipt_max_sequence BIGINT;
+    terminal_count BIGINT;
+    nonterminal_count BIGINT;
+    self_cause_count BIGINT;
+    distinct_failure_sequence_count BIGINT;
+    distinct_failure_code_count BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'study_event_receipts' THEN
+        origin_id := NEW.originating_study_flush_receipt_id;
+        origin_stream_id := NEW.client_stream_id;
+    ELSE
+        origin_id := NEW.study_flush_receipt_id;
+        origin_stream_id := NEW.client_stream_id;
+    END IF;
+
+    SELECT
+        flush.first_client_sequence,
+        flush.last_client_sequence,
+        flush.acknowledged_through_client_sequence
+    INTO suffix_first, suffix_last, flush_acknowledged_through
+    FROM study_flush_receipts flush
+    WHERE flush.study_flush_receipt_id = origin_id
+      AND flush.client_stream_id = origin_stream_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'event receipt origin must identify an immutable flush batch on the same client stream';
+    END IF;
+
+    SELECT stream.adjudicated_through_client_sequence
+    INTO STRICT stream_adjudicated_through
+    FROM study_client_streams stream
+    WHERE stream.client_stream_id = origin_stream_id;
+
+    IF stream_adjudicated_through IS DISTINCT FROM flush_acknowledged_through THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'originating flush acknowledgement must equal the committed client stream cursor';
+    END IF;
+
+    SELECT
+        count(*),
+        min(receipt.client_sequence),
+        max(receipt.client_sequence),
+        count(*) FILTER (WHERE receipt.event_receipt_disposition = 'terminal_rejected'),
+        count(*) FILTER (WHERE receipt.event_receipt_disposition <> 'terminal_rejected'),
+        count(*) FILTER (
+            WHERE receipt.event_receipt_disposition = 'terminal_rejected'
+              AND receipt.terminal_failure_client_sequence = receipt.client_sequence
+        ),
+        count(DISTINCT receipt.terminal_failure_client_sequence) FILTER (
+            WHERE receipt.event_receipt_disposition = 'terminal_rejected'
+        ),
+        count(DISTINCT receipt.event_receipt_code) FILTER (
+            WHERE receipt.event_receipt_disposition = 'terminal_rejected'
+        )
+    INTO
+        receipt_count,
+        receipt_min_sequence,
+        receipt_max_sequence,
+        terminal_count,
+        nonterminal_count,
+        self_cause_count,
+        distinct_failure_sequence_count,
+        distinct_failure_code_count
+    FROM study_event_receipts receipt
+    WHERE receipt.client_stream_id = origin_stream_id
+      AND receipt.originating_study_flush_receipt_id = origin_id;
+
+    IF suffix_first IS NULL THEN
+        IF receipt_count <> 0 THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = 'an empty newly adjudicated suffix cannot own event receipts';
+        END IF;
+    ELSE
+        SELECT max(receipt.client_sequence)
+        INTO previous_receipt_max_sequence
+        FROM study_event_receipts receipt
+        WHERE receipt.client_stream_id = origin_stream_id
+          AND receipt.originating_study_flush_receipt_id <> origin_id;
+
+        IF suffix_first IS DISTINCT FROM coalesce(previous_receipt_max_sequence, 0) + 1
+           OR receipt_count <> suffix_last - suffix_first + 1
+           OR receipt_min_sequence IS DISTINCT FROM suffix_first
+           OR receipt_max_sequence IS DISTINCT FROM suffix_last THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = 'originating flush bounds must exactly cover the next contiguous newly adjudicated suffix';
+        END IF;
+    END IF;
+
+    IF terminal_count > 0
+       AND (nonterminal_count <> 0
+            OR self_cause_count <> 1
+            OR distinct_failure_sequence_count <> 1
+            OR distinct_failure_code_count <> 1) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'a terminal sync suffix must share one self-causative sequence and one terminal code';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER study_event_receipts_validate_origin_batch
+    AFTER INSERT ON study_event_receipts
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION study_validate_event_receipt_origin_batch();
+
+CREATE CONSTRAINT TRIGGER study_flush_receipts_validate_origin_batch
+    AFTER INSERT ON study_flush_receipts
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION study_validate_event_receipt_origin_batch();
 
 CREATE TABLE study_card_identity_redirects (
     historical_study_card_identity UUID PRIMARY KEY,
@@ -1072,3 +1263,10 @@ CREATE TRIGGER study_scheduler_card_projections_validate_redirects
 CREATE TRIGGER study_scheduler_card_projections_set_updated_at
     BEFORE UPDATE ON study_scheduler_card_projections
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+ALTER TABLE ideas DROP CONSTRAINT ideas_merged_into_id_fkey;
+ALTER TABLE ideas
+    ADD CONSTRAINT ideas_merged_into_id_fkey
+    FOREIGN KEY (merged_into_id) REFERENCES ideas(id) ON DELETE CASCADE;
+ALTER TABLE ideas
+    ADD CONSTRAINT ideas_merged_identity_shape
+    CHECK ((status = 'merged') = (merged_into_id IS NOT NULL));

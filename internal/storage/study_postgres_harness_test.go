@@ -84,14 +84,8 @@ func startStudyTestPostgres(t *testing.T) *studyTestPostgres {
 	if err != nil {
 		t.Fatalf("STUDY_TEST_POSTGRES.PORT_RESOLUTION_FAILED: %v", err)
 	}
-	createOutput, err := exec.CommandContext(
-		readyContext,
-		"docker",
-		"exec", harness.containerName,
-		"createdb", "--username", "postgres", harness.databaseName,
-	).CombinedOutput()
-	if err != nil {
-		t.Fatalf("STUDY_TEST_POSTGRES.DATABASE_CREATE_FAILED: %v (%s)", err, boundedTestOutput(createOutput))
+	if err := createStudyTestDatabase(readyContext, harness.containerName, harness.databaseName); err != nil {
+		t.Fatal(err)
 	}
 
 	harness.dsn = fmt.Sprintf(
@@ -99,7 +93,61 @@ func startStudyTestPostgres(t *testing.T) *studyTestPostgres {
 		hostPort,
 		harness.databaseName,
 	)
+	if err := waitForStudyTestDatabase(readyContext, harness.dsn); err != nil {
+		t.Fatal(err)
+	}
 	return harness
+}
+
+func createStudyTestDatabase(ctx context.Context, containerName, databaseName string) error {
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	var lastOutput []byte
+	for {
+		output, err := exec.CommandContext(
+			ctx,
+			"docker",
+			"exec", containerName,
+			"createdb", "--username", "postgres", databaseName,
+		).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastOutput = output
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"STUDY_TEST_POSTGRES.DATABASE_CREATE_FAILED: deadline (%s)",
+				boundedTestOutput(lastOutput),
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForStudyTestDatabase(ctx context.Context, dsn string) error {
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err == nil {
+			err = pool.Ping(ctx)
+			pool.Close()
+		}
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"STUDY_TEST_POSTGRES.FINAL_DATABASE_READINESS_FAILED: cause_type=%T",
+				lastErr,
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 func openExplicitStudyTestPostgres(t *testing.T, dsn string) *studyTestPostgres {
