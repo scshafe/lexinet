@@ -40,3 +40,11 @@ released = true
 dirty = false
 mode = "adopted"
 params = { kind = "service", name = "lexinet", date = "2026-10-18" }
+
+# IDENT-01: what this project's agent may do (scshafe/infra docs/platform/agent-identity.md).
+# References, never secrets. `dev identity plan` compares it with the host and GitHub.
+[identity]
+agent = "agent-lexinet"
+github = ["contents=write", "pull_requests=write", "issues=write", "workflows=write", "actions=write"]
+# Rootless Docker for agent-lexinet ([verify] starts disposable postgres:16 containers); `sudo scshafe-agent-setup docker <project>`.
+docker = true
