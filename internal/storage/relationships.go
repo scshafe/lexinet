@@ -14,36 +14,22 @@ import (
 )
 
 func (r *Repository) UpsertRelationship(ctx context.Context, fromRef, toRef string, kind model.RelationKind, note *string) (*model.Relationship, error) {
-	tx, err := r.db.Begin(ctx)
+	var relationship *model.Relationship
+	err := r.withLockedCurrentIdeas(ctx, "relationship_upsert", []currentIdeaTarget{currentIdeaRef(fromRef), currentIdeaRef(toRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		normalized, err := model.NormalizeRelation(ids[0], ids[1], kind)
+		if err != nil {
+			return err
+		}
+		relationship, err = scanRelationship(tx.QueryRow(ctx, `
+			INSERT INTO relationships (from_idea_id, to_idea_id, kind, note)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (from_idea_id, to_idea_id, kind)
+			DO UPDATE SET note = EXCLUDED.note
+			RETURNING id, from_idea_id, to_idea_id, kind, note, created_at, updated_at`,
+			normalized.FromIdeaID, normalized.ToIdeaID, normalized.Kind, note))
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	fromIdeaID, err := resolveIdeaID(ctx, tx, fromRef)
-	if err != nil {
-		return nil, err
-	}
-	toIdeaID, err := resolveIdeaID(ctx, tx, toRef)
-	if err != nil {
-		return nil, err
-	}
-	normalized, err := model.NormalizeRelation(fromIdeaID, toIdeaID, kind)
-	if err != nil {
-		return nil, err
-	}
-
-	relationship, err := scanRelationship(tx.QueryRow(ctx, `
-		INSERT INTO relationships (from_idea_id, to_idea_id, kind, note)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (from_idea_id, to_idea_id, kind)
-		DO UPDATE SET note = EXCLUDED.note
-		RETURNING id, from_idea_id, to_idea_id, kind, note, created_at, updated_at`,
-		normalized.FromIdeaID, normalized.ToIdeaID, normalized.Kind, note))
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return relationship, nil

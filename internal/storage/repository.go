@@ -57,11 +57,16 @@ type dbRunner interface {
 type dbPool interface {
 	dbRunner
 	Begin(context.Context) (pgx.Tx, error)
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
 
 type Repository struct {
-	db               dbPool
-	searchStrategies searchcfg.StrategyProvider
+	db                               dbPool
+	searchStrategies                 searchcfg.StrategyProvider
+	studyMergeBeforeLock             func(uuid.UUID, uuid.UUID, [2]uuid.UUID)
+	ideaMutationAfterResolve         func(string, []uuid.UUID)
+	studyEventBeforeCommit           func(context.Context, pgx.Tx) error
+	studyMaterializationBeforeCommit func(context.Context, pgx.Tx) error
 }
 
 type RepositoryOption func(*Repository)
@@ -241,132 +246,82 @@ func (r *Repository) ListIdeas(ctx context.Context, input model.IdeaListInput) (
 }
 
 func (r *Repository) UpdateIdea(ctx context.Context, ref string, input model.UpdateIdeaInput) (*model.Idea, error) {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return nil, err
+	if input.Status != nil && *input.Status == model.IdeaStatusMerged {
+		return nil, newStudyStorageError(model.StudyErrorCodeSchemaInvalid, "merged status is reserved for idea merge", "idea_update", false, nil)
 	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ref)
-	if err != nil {
-		return nil, err
-	}
-	current, err := getIdeaByID(ctx, tx, ideaID)
-	if err != nil {
-		return nil, err
-	}
-	slug := current.Slug
-	if input.Slug != nil {
-		slug = *input.Slug
-	}
-	summary := current.Summary
-	if input.Summary != nil {
-		summary = *input.Summary
-	}
-	domain := current.Domain
-	if input.Domain != nil {
-		domain = *input.Domain
-	}
-	status := current.Status
-	if input.Status != nil {
-		if !input.Status.Valid() {
-			return nil, fmt.Errorf("update idea: invalid status %q", *input.Status)
+	var idea *model.Idea
+	err := r.withLockedCurrentIdeas(ctx, "idea_update", []currentIdeaTarget{currentIdeaRef(ref)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		current, err := getIdeaByID(ctx, tx, ids[0])
+		if err != nil {
+			return err
 		}
-		status = *input.Status
-	}
-	idea, err := scanIdea(tx.QueryRow(ctx, `
-		UPDATE ideas
-		SET slug = $2, summary = $3, domain = $4, status = $5
-		WHERE id = $1
-		RETURNING id, slug, summary, domain, status, canonical_name_id, merged_into_id, created_at, updated_at`,
-		ideaID, slug, summary, domain, status))
+		slug := current.Slug
+		if input.Slug != nil {
+			slug = *input.Slug
+		}
+		summary := current.Summary
+		if input.Summary != nil {
+			summary = *input.Summary
+		}
+		domain := current.Domain
+		if input.Domain != nil {
+			domain = *input.Domain
+		}
+		status := current.Status
+		if input.Status != nil {
+			if !input.Status.Valid() {
+				return fmt.Errorf("update idea: invalid status %q", *input.Status)
+			}
+			status = *input.Status
+		}
+		idea, err = scanIdea(tx.QueryRow(ctx, `
+			UPDATE ideas
+			SET slug = $2, summary = $3, domain = $4, status = $5
+			WHERE id = $1
+			RETURNING id, slug, summary, domain, status, canonical_name_id, merged_into_id, created_at, updated_at`,
+			ids[0], slug, summary, domain, status))
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return idea, nil
 }
 
 func (r *Repository) DeleteIdea(ctx context.Context, ref string) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ref)
-	if err != nil {
-		return err
-	}
-	tag, err := tx.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, ideaID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrIdeaNotFound
-	}
-	return tx.Commit(ctx)
+	return r.withLockedCurrentIdeas(ctx, "idea_delete", []currentIdeaTarget{currentIdeaRef(ref)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, ids[0])
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrIdeaNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) AddName(ctx context.Context, ideaID uuid.UUID, input model.CreateNameInput) (*model.Name, error) {
-	if input.Kind == "" {
-		input.Kind = model.NameKindAlias
-	}
-	if !input.Kind.Valid() {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidNameKind, input.Kind)
-	}
-	normalizeNameInput(&input)
-	tx, err := r.db.Begin(ctx)
+	var name *model.Name
+	err := r.withLockedCurrentIdeas(ctx, "name_add", []currentIdeaTarget{currentIdeaID(ideaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var err error
+		name, err = addNameInTx(ctx, tx, ids[0], input)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	if input.Kind == model.NameKindCanonical {
-		if _, err := tx.Exec(ctx, `
-			UPDATE names
-			SET kind = 'alias'
-			WHERE idea_id = $1 AND kind = 'canonical'`, ideaID); err != nil {
-			return nil, err
-		}
-	}
-
-	name, err := insertName(ctx, tx, ideaID, input)
-	if err != nil {
-		return nil, err
-	}
-	if name.Kind == model.NameKindCanonical {
-		if _, err := tx.Exec(ctx, `
-			UPDATE ideas
-			SET canonical_name_id = $2
-			WHERE id = $1`, ideaID, name.ID); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return name, nil
 }
 
 func (r *Repository) AddNameByRef(ctx context.Context, ideaRef string, input model.CreateNameInput) (*model.Name, error) {
-	tx, err := r.db.Begin(ctx)
+	var name *model.Name
+	err := r.withLockedCurrentIdeas(ctx, "name_add", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var err error
+		name, err = addNameInTx(ctx, tx, ids[0], input)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return nil, err
-	}
-	name, err := addNameInTx(ctx, tx, ideaID, input)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return name, nil
@@ -444,116 +399,129 @@ func (r *Repository) GetName(ctx context.Context, id uuid.UUID) (*model.Name, er
 }
 
 func (r *Repository) UpdateName(ctx context.Context, id uuid.UUID, input model.UpdateNameInput) (*model.Name, error) {
-	tx, err := r.db.Begin(ctx)
+	initial, err := r.GetName(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
-
-	current, err := scanName(tx.QueryRow(ctx, `
-		SELECT id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at
-		FROM names
-		WHERE id = $1`, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNameNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	text := current.Text
-	if input.Text != nil {
-		text = strings.TrimSpace(*input.Text)
-		if text == "" {
-			return nil, fmt.Errorf("update name: text is required")
+	var name *model.Name
+	err = r.withLockedCurrentIdeas(ctx, "name_update", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		current, err := scanName(tx.QueryRow(ctx, `
+			SELECT id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at
+			FROM names
+			WHERE id = $1`, id))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNameNotFound
 		}
-	}
-	display := current.Display
-	if input.Display != nil {
-		display = *input.Display
-	}
-	kind := current.Kind
-	if input.Kind != nil {
-		if !input.Kind.Valid() {
-			return nil, fmt.Errorf("%w: %q", ErrInvalidNameKind, *input.Kind)
+		if err != nil {
+			return err
 		}
-		kind = *input.Kind
-	}
-	expansion := current.Expansion
-	if input.Expansion != nil {
-		expansion = *input.Expansion
-	}
-	langTag := current.LangTag
-	if input.LangTag != nil {
-		langTag = *input.LangTag
-	}
-	deprecationNote := current.DeprecationNote
-	if input.DeprecationNote != nil {
-		deprecationNote = *input.DeprecationNote
-	}
-	if kind != model.NameKindAcronym {
-		expansion = nil
-	}
-	if kind != model.NameKindLocalized {
-		langTag = nil
-	}
-	if kind != model.NameKindDeprecated {
-		deprecationNote = nil
-	}
-	if kind == model.NameKindCanonical {
-		if _, err := tx.Exec(ctx, `
+		if current.IdeaID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		text := current.Text
+		if input.Text != nil {
+			text = strings.TrimSpace(*input.Text)
+			if text == "" {
+				return fmt.Errorf("update name: text is required")
+			}
+		}
+		display := current.Display
+		if input.Display != nil {
+			display = *input.Display
+		}
+		kind := current.Kind
+		if input.Kind != nil {
+			if !input.Kind.Valid() {
+				return fmt.Errorf("%w: %q", ErrInvalidNameKind, *input.Kind)
+			}
+			kind = *input.Kind
+		}
+		expansion := current.Expansion
+		if input.Expansion != nil {
+			expansion = *input.Expansion
+		}
+		langTag := current.LangTag
+		if input.LangTag != nil {
+			langTag = *input.LangTag
+		}
+		deprecationNote := current.DeprecationNote
+		if input.DeprecationNote != nil {
+			deprecationNote = *input.DeprecationNote
+		}
+		if kind != model.NameKindAcronym {
+			expansion = nil
+		}
+		if kind != model.NameKindLocalized {
+			langTag = nil
+		}
+		if kind != model.NameKindDeprecated {
+			deprecationNote = nil
+		}
+		if kind == model.NameKindCanonical {
+			if _, err := tx.Exec(ctx, `
+				UPDATE names
+				SET kind = 'alias'
+				WHERE idea_id = $1 AND kind = 'canonical' AND id <> $2`, current.IdeaID, id); err != nil {
+				return err
+			}
+		}
+		sortKey := current.SortKey
+		if input.SortKey != nil {
+			sortKey = *input.SortKey
+		}
+		name, err = scanName(tx.QueryRow(ctx, `
 			UPDATE names
-			SET kind = 'alias'
-			WHERE idea_id = $1 AND kind = 'canonical' AND id <> $2`, current.IdeaID, id); err != nil {
-			return nil, err
+			SET text = $2, display = $3, kind = $4, expansion = $5, lang_tag = $6, deprecation_note = $7, sort_key = $8
+			WHERE id = $1
+			RETURNING id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at`,
+			id, text, display, kind, expansion, langTag, deprecationNote, sortKey))
+		if err != nil {
+			return err
 		}
-	}
-	sortKey := current.SortKey
-	if input.SortKey != nil {
-		sortKey = *input.SortKey
-	}
-	name, err := scanName(tx.QueryRow(ctx, `
-		UPDATE names
-		SET text = $2, display = $3, kind = $4, expansion = $5, lang_tag = $6, deprecation_note = $7, sort_key = $8
-		WHERE id = $1
-		RETURNING id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at`,
-		id, text, display, kind, expansion, langTag, deprecationNote, sortKey))
+		if name.Kind == model.NameKindCanonical {
+			_, err = tx.Exec(ctx, `
+				UPDATE ideas
+				SET canonical_name_id = $2
+				WHERE id = $1`, name.IdeaID, name.ID)
+		}
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	if name.Kind == model.NameKindCanonical {
-		if _, err := tx.Exec(ctx, `
-			UPDATE ideas
-			SET canonical_name_id = $2
-			WHERE id = $1`, name.IdeaID, name.ID); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return name, nil
 }
 
 func (r *Repository) DeleteName(ctx context.Context, id uuid.UUID) error {
-	var kind string
-	err := r.db.QueryRow(ctx, `SELECT kind FROM names WHERE id = $1`, id).Scan(&kind)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNameNotFound
-	}
+	initial, err := r.GetName(ctx, id)
 	if err != nil {
 		return err
 	}
-	if model.NameKind(kind) == model.NameKindCanonical {
-		return ErrCanonicalName
-	}
-	tag, err := r.db.Exec(ctx, `DELETE FROM names WHERE id = $1`, id)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNameNotFound
-	}
-	return nil
+	return r.withLockedCurrentIdeas(ctx, "name_delete", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var ownerID uuid.UUID
+		var kind string
+		err := tx.QueryRow(ctx, `SELECT idea_id, kind FROM names WHERE id = $1`, id).Scan(&ownerID, &kind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNameNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if ownerID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		if model.NameKind(kind) == model.NameKindCanonical {
+			return ErrCanonicalName
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM names WHERE id = $1`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNameNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) ResolveIdeaID(ctx context.Context, ref string) (uuid.UUID, error) {
@@ -566,47 +534,40 @@ func (r *Repository) PromoteName(ctx context.Context, ideaID uuid.UUID, nameText
 		return nil, fmt.Errorf("%w: empty name", ErrNameNotFound)
 	}
 
-	tx, err := r.db.Begin(ctx)
+	var name *model.Name
+	err := r.withLockedCurrentIdeas(ctx, "name_promote", []currentIdeaTarget{currentIdeaID(ideaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var targetID uuid.UUID
+		err := tx.QueryRow(ctx, `
+			SELECT id
+			FROM names
+			WHERE idea_id = $1 AND text = $2`, ids[0], nameText).Scan(&targetID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNameNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE names
+			SET kind = 'alias'
+			WHERE idea_id = $1 AND kind = 'canonical' AND id <> $2`, ids[0], targetID); err != nil {
+			return err
+		}
+		name, err = scanName(tx.QueryRow(ctx, `
+			UPDATE names
+			SET kind = 'canonical', expansion = NULL, lang_tag = NULL, deprecation_note = NULL
+			WHERE id = $1
+			RETURNING id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at`, targetID))
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE ideas
+			SET canonical_name_id = $2
+			WHERE id = $1`, ids[0], name.ID)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	var targetID uuid.UUID
-	err = tx.QueryRow(ctx, `
-		SELECT id
-		FROM names
-		WHERE idea_id = $1 AND text = $2`, ideaID, nameText).Scan(&targetID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNameNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE names
-		SET kind = 'alias'
-		WHERE idea_id = $1 AND kind = 'canonical' AND id <> $2`, ideaID, targetID); err != nil {
-		return nil, err
-	}
-
-	name, err := scanName(tx.QueryRow(ctx, `
-		UPDATE names
-		SET kind = 'canonical', expansion = NULL, lang_tag = NULL, deprecation_note = NULL
-		WHERE id = $1
-		RETURNING id, idea_id, text::text, display, kind, expansion, lang_tag, deprecation_note, sort_key, created_at, updated_at`, targetID))
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE ideas
-		SET canonical_name_id = $2
-		WHERE id = $1`, ideaID, name.ID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return name, nil
@@ -616,21 +577,13 @@ func (r *Repository) CreateDefinition(ctx context.Context, ideaRef string, input
 	if strings.TrimSpace(input.Body) == "" {
 		return nil, fmt.Errorf("create definition: body is required")
 	}
-	tx, err := r.db.Begin(ctx)
+	var definition *model.Definition
+	err := r.withLockedCurrentIdeas(ctx, "definition_create", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var err error
+		definition, err = insertDefinition(ctx, tx, ids[0], input)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return nil, err
-	}
-	definition, err := insertDefinition(ctx, tx, ideaID, input)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return definition, nil
@@ -674,75 +627,98 @@ func (r *Repository) GetDefinition(ctx context.Context, id uuid.UUID) (*model.De
 }
 
 func (r *Repository) UpdateDefinition(ctx context.Context, id uuid.UUID, input model.UpdateDefinitionInput) (*model.Definition, error) {
-	current, err := r.GetDefinition(ctx, id)
+	initial, err := r.GetDefinition(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	body := current.Body
-	if input.Body != nil {
-		body = strings.TrimSpace(*input.Body)
-		if body == "" {
-			return nil, fmt.Errorf("update definition: body is required")
+	var definition *model.Definition
+	err = r.withLockedCurrentIdeas(ctx, "definition_update", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		current, err := scanDefinition(tx.QueryRow(ctx, `
+			SELECT id, idea_id, body, register, source, is_primary, sort_key, created_at, updated_at
+			FROM definitions WHERE id = $1`, id))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrDefinitionNotFound
 		}
+		if err != nil {
+			return err
+		}
+		if current.IdeaID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		body := current.Body
+		if input.Body != nil {
+			body = strings.TrimSpace(*input.Body)
+			if body == "" {
+				return fmt.Errorf("update definition: body is required")
+			}
+		}
+		register := current.Register
+		if input.Register != nil {
+			register = *input.Register
+		}
+		source := current.Source
+		if input.Source != nil {
+			source = *input.Source
+		}
+		isPrimary := current.IsPrimary
+		if input.IsPrimary != nil {
+			isPrimary = *input.IsPrimary
+		}
+		sortKey := current.SortKey
+		if input.SortKey != nil {
+			sortKey = *input.SortKey
+		}
+		definition, err = scanDefinition(tx.QueryRow(ctx, `
+			UPDATE definitions
+			SET body = $2, register = $3, source = $4, is_primary = $5, sort_key = $6
+			WHERE id = $1
+			RETURNING id, idea_id, body, register, source, is_primary, sort_key, created_at, updated_at`,
+			id, body, register, source, isPrimary, sortKey))
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	register := current.Register
-	if input.Register != nil {
-		register = *input.Register
-	}
-	source := current.Source
-	if input.Source != nil {
-		source = *input.Source
-	}
-	isPrimary := current.IsPrimary
-	if input.IsPrimary != nil {
-		isPrimary = *input.IsPrimary
-	}
-	sortKey := current.SortKey
-	if input.SortKey != nil {
-		sortKey = *input.SortKey
-	}
-	definition, err := scanDefinition(r.db.QueryRow(ctx, `
-		UPDATE definitions
-		SET body = $2, register = $3, source = $4, is_primary = $5, sort_key = $6
-		WHERE id = $1
-		RETURNING id, idea_id, body, register, source, is_primary, sort_key, created_at, updated_at`,
-		id, body, register, source, isPrimary, sortKey))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrDefinitionNotFound
-	}
-	return definition, err
+	return definition, nil
 }
 
 func (r *Repository) DeleteDefinition(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.db.Exec(ctx, `DELETE FROM definitions WHERE id = $1`, id)
+	initial, err := r.GetDefinition(ctx, id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrDefinitionNotFound
-	}
-	return nil
+	return r.withLockedCurrentIdeas(ctx, "definition_delete", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var ownerID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT idea_id FROM definitions WHERE id = $1`, id).Scan(&ownerID); errors.Is(err, pgx.ErrNoRows) {
+			return ErrDefinitionNotFound
+		} else if err != nil {
+			return err
+		}
+		if ownerID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM definitions WHERE id = $1`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrDefinitionNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) CreateExample(ctx context.Context, ideaRef string, input model.CreateExampleInput) (*model.Example, error) {
 	if strings.TrimSpace(input.Body) == "" {
 		return nil, fmt.Errorf("create example: body is required")
 	}
-	tx, err := r.db.Begin(ctx)
+	var example *model.Example
+	err := r.withLockedCurrentIdeas(ctx, "example_create", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var err error
+		example, err = insertExample(ctx, tx, ids[0], input)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return nil, err
-	}
-	example, err := insertExample(ctx, tx, ideaID, input)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return example, nil
@@ -786,71 +762,94 @@ func (r *Repository) GetExample(ctx context.Context, id uuid.UUID) (*model.Examp
 }
 
 func (r *Repository) UpdateExample(ctx context.Context, id uuid.UUID, input model.UpdateExampleInput) (*model.Example, error) {
-	current, err := r.GetExample(ctx, id)
+	initial, err := r.GetExample(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	body := current.Body
-	if input.Body != nil {
-		body = strings.TrimSpace(*input.Body)
-		if body == "" {
-			return nil, fmt.Errorf("update example: body is required")
+	var example *model.Example
+	err = r.withLockedCurrentIdeas(ctx, "example_update", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		current, err := scanExample(tx.QueryRow(ctx, `
+			SELECT id, idea_id, body, lang, caption, sort_key, created_at, updated_at
+			FROM examples WHERE id = $1`, id))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrExampleNotFound
 		}
+		if err != nil {
+			return err
+		}
+		if current.IdeaID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		body := current.Body
+		if input.Body != nil {
+			body = strings.TrimSpace(*input.Body)
+			if body == "" {
+				return fmt.Errorf("update example: body is required")
+			}
+		}
+		lang := current.Lang
+		if input.Lang != nil {
+			lang = *input.Lang
+		}
+		caption := current.Caption
+		if input.Caption != nil {
+			caption = *input.Caption
+		}
+		sortKey := current.SortKey
+		if input.SortKey != nil {
+			sortKey = *input.SortKey
+		}
+		example, err = scanExample(tx.QueryRow(ctx, `
+			UPDATE examples
+			SET body = $2, lang = $3, caption = $4, sort_key = $5
+			WHERE id = $1
+			RETURNING id, idea_id, body, lang, caption, sort_key, created_at, updated_at`,
+			id, body, lang, caption, sortKey))
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	lang := current.Lang
-	if input.Lang != nil {
-		lang = *input.Lang
-	}
-	caption := current.Caption
-	if input.Caption != nil {
-		caption = *input.Caption
-	}
-	sortKey := current.SortKey
-	if input.SortKey != nil {
-		sortKey = *input.SortKey
-	}
-	example, err := scanExample(r.db.QueryRow(ctx, `
-		UPDATE examples
-		SET body = $2, lang = $3, caption = $4, sort_key = $5
-		WHERE id = $1
-		RETURNING id, idea_id, body, lang, caption, sort_key, created_at, updated_at`,
-		id, body, lang, caption, sortKey))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrExampleNotFound
-	}
-	return example, err
+	return example, nil
 }
 
 func (r *Repository) DeleteExample(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.db.Exec(ctx, `DELETE FROM examples WHERE id = $1`, id)
+	initial, err := r.GetExample(ctx, id)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrExampleNotFound
-	}
-	return nil
+	return r.withLockedCurrentIdeas(ctx, "example_delete", []currentIdeaTarget{currentIdeaID(initial.IdeaID)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var ownerID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT idea_id FROM examples WHERE id = $1`, id).Scan(&ownerID); errors.Is(err, pgx.ErrNoRows) {
+			return ErrExampleNotFound
+		} else if err != nil {
+			return err
+		}
+		if ownerID != ids[0] {
+			return errCurrentIdeaChanged
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM examples WHERE id = $1`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrExampleNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) CreateNote(ctx context.Context, ideaRef string, input model.CreateNoteInput) (*model.Note, error) {
 	if strings.TrimSpace(input.Body) == "" {
 		return nil, fmt.Errorf("create note: body is required")
 	}
-	tx, err := r.db.Begin(ctx)
+	var note *model.Note
+	err := r.withLockedCurrentIdeas(ctx, "note_create", []currentIdeaTarget{currentIdeaRef(ideaRef)}, func(tx pgx.Tx, ids []uuid.UUID) error {
+		var err error
+		note, err = insertNote(ctx, tx, ids[0], input)
+		return err
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	ideaID, err := resolveIdeaID(ctx, tx, ideaRef)
-	if err != nil {
-		return nil, err
-	}
-	note, err := insertNote(ctx, tx, ideaID, input)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return note, nil

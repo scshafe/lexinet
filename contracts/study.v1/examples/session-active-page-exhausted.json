@@ -1,0 +1,48 @@
+{
+  "protocol_version": "study.v1",
+  "schema_version": 1,
+  "required_semantics": [
+    "active_scope_create_or_resume",
+    "immutable_complete_card_projection",
+    "scheduler_provenance",
+    "singular_presented_revealed",
+    "append_only_rated_rating_voided",
+    "durable_client_stream_terminal_receipts",
+    "server_authoritative_cycle_exhaustion",
+    "atomic_predecessor_successor_linking",
+    "predecessor_flush_receipt_barrier",
+    "waiting_for_corpus_convergence",
+    "normalized_hash_idempotency",
+    "late_completed_predecessor_correction"
+  ],
+  "session_id": "13131313-1313-4313-8313-131313131313",
+  "profile_ref": "fixture-default",
+  "scope": {
+    "topic_refs": [
+      "fixture-systems"
+    ],
+    "card_kind": "idea"
+  },
+  "lifecycle": "active",
+  "creation_receipt": null,
+  "predecessor_session_id": null,
+  "successor_session_id": null,
+  "corpus_sha256": "abababababababababababababababababababababababababababababababab",
+  "profile_ingestion_high_water": 20,
+  "state_version": 3,
+  "scheduler": {
+    "name": "variety_first_v1",
+    "version": "1",
+    "configuration_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "input_profile_ingestion_high_water": 20,
+    "planned_at": "2026-08-16T12:00:00Z",
+    "seed": "fixture-exhausted-page-seed"
+  },
+  "page": {
+    "after_position": 0,
+    "next_after_position": 0,
+    "complete": true,
+    "items": []
+  },
+  "generated_at": "2026-08-16T12:02:00Z"
+}

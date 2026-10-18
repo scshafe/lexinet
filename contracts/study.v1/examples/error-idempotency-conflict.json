@@ -1,0 +1,8 @@
+{
+  "error": {
+    "protocol_version": "study.v1",
+    "schema_version": 1,
+    "code": "IDEMPOTENCY_CONFLICT",
+    "message": "the idempotency identity was previously bound to different normalized input"
+  }
+}

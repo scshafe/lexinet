@@ -23,14 +23,17 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      # loopback ONLY — the VM cannot bind the host's tailscale address. Tailnet exposure is
-      # bridged host-side by `tailscale serve --bg --tcp 17892 tcp://127.0.0.1:17892`
-      # (tailnet-only, no LAN exposure; persisted by tailscaled across restarts).
+      # Loopback only. Do not proxy this ordinary HTTP surface into a Tailnet.
+      # Native Tailnet deployments use Lexinet's separate tsnet TLS listener on
+      # fixed port 443 and a pre-enrolled owner-only state bind mount; see README.
       - "127.0.0.1:17892:17892"
     environment:
       LEXINET_CONFIG: /etc/lexinet/config.toml
     volumes:
       - ./config.toml:/etc/lexinet/config.toml:ro
+      # Intentionally no tsnet state mount in this Tailnet-disabled profile.
+      # A production override must bind-mount pre-enrolled, service-owned 0700
+      # state at /var/lib/lexinet/tsnet-state; never put enrollment keys here.
     command: ["serve", "--bind", "0.0.0.0:17892", "--tailnet", "off"]
     healthcheck:
       test: ["CMD", "/usr/local/bin/lexinet", "--endpoint", "http://127.0.0.1:17892", "ping"]

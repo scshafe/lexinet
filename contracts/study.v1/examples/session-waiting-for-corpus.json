@@ -1,0 +1,46 @@
+{
+  "protocol_version": "study.v1",
+  "schema_version": 1,
+  "required_semantics": [
+    "active_scope_create_or_resume",
+    "immutable_complete_card_projection",
+    "scheduler_provenance",
+    "singular_presented_revealed",
+    "append_only_rated_rating_voided",
+    "durable_client_stream_terminal_receipts",
+    "server_authoritative_cycle_exhaustion",
+    "atomic_predecessor_successor_linking",
+    "predecessor_flush_receipt_barrier",
+    "waiting_for_corpus_convergence",
+    "normalized_hash_idempotency",
+    "late_completed_predecessor_correction"
+  ],
+  "session_id": "12121212-1212-4212-8212-121212121212",
+  "profile_ref": "fixture-default",
+  "scope": {
+    "topic_refs": [
+      "fixture-empty"
+    ],
+    "card_kind": "idea"
+  },
+  "lifecycle": "waiting_for_corpus",
+  "creation_receipt": {
+    "creation_request_id": "abababab-abab-4bab-8bab-abababababab",
+    "normalized_request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "disposition": "created",
+    "canonical_session_id": "12121212-1212-4212-8212-121212121212"
+  },
+  "predecessor_session_id": null,
+  "successor_session_id": null,
+  "corpus_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "profile_ingestion_high_water": 40,
+  "state_version": 1,
+  "scheduler": null,
+  "page": {
+    "after_position": -1,
+    "next_after_position": -1,
+    "complete": true,
+    "items": []
+  },
+  "generated_at": "2026-08-16T12:00:01Z"
+}

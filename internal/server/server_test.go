@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,6 +18,102 @@ import (
 	searchcfg "lexinet/internal/search"
 	"lexinet/internal/storage"
 )
+
+func TestValidateConfigurationRejectsTailnetWithoutScopedAuthentication(t *testing.T) {
+	err := ValidateConfiguration(Config{TailnetEnabled: true})
+
+	var configurationError *ConfigurationError
+	if !errors.As(err, &configurationError) {
+		t.Fatalf("error = %T %v, want *ConfigurationError", err, err)
+	}
+	if configurationError.Code != ErrorCodeTailnetStudyAuthenticationInvalid {
+		t.Fatalf("error code = %q, want %q", configurationError.Code, ErrorCodeTailnetStudyAuthenticationInvalid)
+	}
+	if configurationError.Context["configuration_field"] != "service.tailnet_study_authentication" {
+		t.Fatalf("configuration field context = %#v", configurationError.Context["configuration_field"])
+	}
+	if got, want := err.Error(), "CONFIG.TAILNET_STUDY_AUTHENTICATION_INVALID: Tailnet study authentication configuration is invalid"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestValidateConfigurationAllowsTailnetDisabledWithoutBearer(t *testing.T) {
+	if err := ValidateConfiguration(Config{AuthToken: " \t\n ", TailnetEnabled: false}); err != nil {
+		t.Fatalf("validate Tailnet-disabled configuration: %v", err)
+	}
+}
+
+func TestServeRejectsMissingTailnetAuthenticationBeforeDatabaseOrListenerWork(t *testing.T) {
+	err := Serve(context.Background(), Config{
+		TailnetEnabled:  true,
+		DatabaseDSN:     ":// invalid database DSN",
+		ListenLoopback:  "invalid listen address",
+		TailnetHostname: "unsafe-test",
+	})
+
+	var configurationError *ConfigurationError
+	if !errors.As(err, &configurationError) {
+		t.Fatalf("error = %T %v, want *ConfigurationError", err, err)
+	}
+	if configurationError.Code != ErrorCodeTailnetStudyAuthenticationInvalid {
+		t.Fatalf("error code = %q, want %q", configurationError.Code, ErrorCodeTailnetStudyAuthenticationInvalid)
+	}
+}
+
+func TestPrepareConfigurationLoadsScopedTokenExactlyOnceBeforeServe(t *testing.T) {
+	clearTailnetAmbientConfigurationForServerTest(t)
+	stateDirectory := t.TempDir()
+	if err := os.Chmod(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(t.TempDir(), "study-token")
+	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := PrepareConfiguration(Config{
+		TailnetEnabled:              true,
+		TailnetHostname:             "lexinet-study",
+		TailnetStateDir:             stateDirectory,
+		TailnetAuthenticationMode:   "scoped_token",
+		TailnetAllowedProfileRefs:   []string{"learner.primary"},
+		TailnetScopedTokenSubjectID: "11111111-1111-1111-1111-111111111111",
+		TailnetScopedTokenFile:      tokenPath,
+	})
+	if err != nil {
+		t.Fatalf("prepare configuration: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	prepared.config.DatabaseDSN = ":// invalid database DSN"
+
+	err = ServePrepared(context.Background(), prepared)
+	if err == nil {
+		t.Fatal("ServePrepared accepted invalid database DSN")
+	}
+	var configurationError *ConfigurationError
+	if errors.As(err, &configurationError) {
+		t.Fatalf("ServePrepared revalidated prepared credential authority: %v", err)
+	}
+}
+
+func clearTailnetAmbientConfigurationForServerTest(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"TS_AUTHKEY",
+		"TS_AUTH_KEY",
+		"TS_CLIENT_SECRET",
+		"TS_CLIENT_ID",
+		"TS_ID_TOKEN",
+		"TS_AUDIENCE",
+		"TS_CONTROL_URL",
+		"TSNET_FORCE_LOGIN",
+		"TS_DEBUG_ENV_FILE",
+	} {
+		t.Setenv(name, "")
+	}
+}
 
 func TestOpenRoutesBypassAuth(t *testing.T) {
 	router := Router(Config{Version: "test", AuthToken: "secret"}, fakeStore{})

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "protocol_version": "study.v1",
+    "schema_version": 1,
+    "code": "STUDY_CYCLE_NOT_EXHAUSTED",
+    "message": "the predecessor still has an issued item without a canonical presented fact"
+  }
+}

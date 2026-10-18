@@ -1,0 +1,76 @@
+{
+  "protocol_version": "study.v1",
+  "schema_version": 1,
+  "required_semantics": [
+    "active_scope_create_or_resume",
+    "immutable_complete_card_projection",
+    "scheduler_provenance",
+    "singular_presented_revealed",
+    "append_only_rated_rating_voided",
+    "durable_client_stream_terminal_receipts",
+    "server_authoritative_cycle_exhaustion",
+    "atomic_predecessor_successor_linking",
+    "predecessor_flush_receipt_barrier",
+    "waiting_for_corpus_convergence",
+    "normalized_hash_idempotency",
+    "late_completed_predecessor_correction",
+    "future_uncoordinated_required_semantic"
+  ],
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "profile_ref": "fixture-default",
+  "scope": {
+    "topic_refs": [
+      "fixture-systems"
+    ],
+    "card_kind": "idea"
+  },
+  "lifecycle": "active",
+  "creation_receipt": null,
+  "predecessor_session_id": null,
+  "successor_session_id": null,
+  "corpus_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "profile_ingestion_high_water": 40,
+  "state_version": 1,
+  "scheduler": {
+    "name": "variety_first_v1",
+    "version": "1",
+    "configuration_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "input_profile_ingestion_high_water": 40,
+    "planned_at": "2026-08-16T12:00:00Z",
+    "seed": "fixture-seed-2026-08-16"
+  },
+  "page": {
+    "after_position": -1,
+    "next_after_position": 0,
+    "complete": true,
+    "items": [
+      {
+        "session_item_id": "22222222-2222-4222-8222-222222222222",
+        "position": 0,
+        "card_kind": "idea",
+        "card_identity": "33333333-3333-4333-8333-333333333333",
+        "live_source_idea_id": "44444444-4444-4444-8444-444444444444",
+        "source_revision": {
+          "source_kind": "idea",
+          "source_identity": "44444444-4444-4444-8444-444444444444",
+          "content_revision": "fixture-revision-1",
+          "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "front": {
+          "canonical_name": "Fixture Concept"
+        },
+        "back": {
+          "definition": "A synthetic definition used only for contract validation.",
+          "example": null
+        },
+        "selection_reason": {
+          "rating_rank": "unseen_or_unrated",
+          "latest_presented_ingestion_ordinal": null,
+          "tie_breaker_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "boundary_adjustment": "none"
+        }
+      }
+    ]
+  },
+  "generated_at": "2026-08-16T12:00:01Z"
+}

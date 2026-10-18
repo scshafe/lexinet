@@ -46,18 +46,32 @@ type DisplayConfig struct {
 }
 
 type ServiceConfig struct {
-	ListenLoopback  string         `toml:"listen_loopback" json:"listen_loopback"`
-	AuthToken       string         `toml:"auth_token" json:"auth_token"`
-	TailnetEnabled  bool           `toml:"tailnet_enabled" json:"tailnet_enabled"`
-	TailnetHostname string         `toml:"tailnet_hostname" json:"tailnet_hostname"`
-	TailnetStateDir string         `toml:"tailnet_state_dir" json:"tailnet_state_dir"`
-	Database        DatabaseConfig `toml:"database" json:"database"`
+	ListenLoopback             string                           `toml:"listen_loopback" json:"listen_loopback"`
+	AuthToken                  string                           `toml:"auth_token" json:"auth_token"`
+	TailnetEnabled             bool                             `toml:"tailnet_enabled" json:"tailnet_enabled"`
+	TailnetHostname            string                           `toml:"tailnet_hostname" json:"tailnet_hostname"`
+	TailnetStateDir            string                           `toml:"tailnet_state_dir" json:"tailnet_state_dir"`
+	TailnetStudyAuthentication TailnetStudyAuthenticationConfig `toml:"tailnet_study_authentication" json:"tailnet_study_authentication"`
+	Database                   DatabaseConfig                   `toml:"database" json:"database"`
+}
+
+// TailnetStudyAuthenticationConfig contains only non-secret policy inputs and
+// owner-only credential-file references. Authentication modes are mutually
+// exclusive and are validated by the server before migrations or listeners.
+type TailnetStudyAuthenticationConfig struct {
+	Mode                  string   `toml:"mode" json:"mode"`
+	RequiredNodeTag       string   `toml:"required_node_tag" json:"required_node_tag"`
+	ApplicationCapability string   `toml:"application_capability" json:"application_capability"`
+	AllowedProfileRefs    []string `toml:"allowed_profile_refs" json:"allowed_profile_refs"`
+	ScopedTokenSubjectID  string   `toml:"scoped_token_subject_id" json:"scoped_token_subject_id"`
+	ScopedTokenFile       string   `toml:"scoped_token_file" json:"scoped_token_file"`
 }
 
 type DatabaseConfig struct {
 	DSN string `toml:"dsn" json:"dsn"`
 }
 
+// Default returns the loopback-only built-in configuration.
 func Default() Config {
 	return Config{
 		Server: ServerConfig{
@@ -77,7 +91,7 @@ func Default() Config {
 		Service: ServiceConfig{
 			ListenLoopback:  DefaultListen,
 			AuthToken:       "",
-			TailnetEnabled:  true,
+			TailnetEnabled:  false,
 			TailnetHostname: "lexinet",
 			TailnetStateDir: "~/.config/lexinet/tsnet-state",
 			Database: DatabaseConfig{
@@ -263,6 +277,22 @@ func (c *Config) Set(key, value string) error {
 		c.Service.TailnetHostname = value
 	case "service.tailnet_state_dir":
 		c.Service.TailnetStateDir = value
+	case "service.tailnet_study_authentication.mode":
+		c.Service.TailnetStudyAuthentication.Mode = value
+	case "service.tailnet_study_authentication.required_node_tag":
+		c.Service.TailnetStudyAuthentication.RequiredNodeTag = value
+	case "service.tailnet_study_authentication.application_capability":
+		c.Service.TailnetStudyAuthentication.ApplicationCapability = value
+	case "service.tailnet_study_authentication.allowed_profile_refs":
+		profileRefs, err := parseCommaSeparatedConfigurationValues(value)
+		if err != nil {
+			return err
+		}
+		c.Service.TailnetStudyAuthentication.AllowedProfileRefs = profileRefs
+	case "service.tailnet_study_authentication.scoped_token_subject_id":
+		c.Service.TailnetStudyAuthentication.ScopedTokenSubjectID = value
+	case "service.tailnet_study_authentication.scoped_token_file":
+		c.Service.TailnetStudyAuthentication.ScopedTokenFile = value
 	case "service.database.dsn":
 		c.Service.Database.DSN = value
 	default:
@@ -272,6 +302,19 @@ func (c *Config) Set(key, value string) error {
 		return fmt.Errorf("unknown config key %q", key)
 	}
 	return nil
+}
+
+func parseCommaSeparatedConfigurationValues(value string) ([]string, error) {
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("configuration list contains an empty value")
+		}
+		values = append(values, part)
+	}
+	return values, nil
 }
 
 func (c *Config) setSearchStrategyValue(key, value string) error {

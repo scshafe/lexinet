@@ -20,8 +20,8 @@ case "$verb" in
     # Dockerfile builds from, with module and build caches kept between runs.
     docker run --rm -v "$PWD":/src -w /src \
       -v conductor-gomod:/go/pkg/mod -v conductor-gobuild:/root/.cache/go-build \
-      "golang:1.23.4-bookworm" go test ./...
-    echo "conductor-gate: go test ok (golang:1.23.4-bookworm)"
+      "golang:1.26.5-bookworm" go test ./...
+    echo "conductor-gate: go test ok (golang:1.26.5-bookworm)"
     ;;
   verify)
     url="${1:?verify needs the health URL}"
