@@ -46,3 +46,5 @@ params = { kind = "service", name = "lexinet", date = "2026-10-18" }
 [identity]
 agent = "agent-lexinet"
 github = ["contents=write", "pull_requests=write", "issues=write", "workflows=write", "actions=write"]
+# Rootless Docker for agent-lexinet ([verify] starts disposable postgres:16 containers); `sudo scshafe-agent-setup docker <project>`.
+docker = true
