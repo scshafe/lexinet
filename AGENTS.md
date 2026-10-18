@@ -33,3 +33,22 @@ commands), on Postgres 16 with `pg_trgm`. Public, MIT. A scshafe-dev `service` p
 - **History:** the `study.v1` work (2026-08-16/17) was developed on the Air and
   published here on 2026-10-18; embedded-house-panel's pin `ce42272` is an ancestor
   of `main`.
+
+<!-- scshafe-dev:begin landing -->
+## Verify and landing
+
+Managed by scshafe-dev: `dev adopt` and `dev update` refresh this section from `dev.toml`; change `dev.toml`, not these lines.
+
+Before finishing, both of these must pass:
+
+```sh
+go test ./...
+dev check .
+```
+
+How a change lands:
+
+1. Work on a branch and open a PR.
+2. Run the two commands above. If the repository is private, GitHub Actions does not run for it: verify locally and say in the PR what you ran. If it is public, wait for CI to be green.
+3. Merge the PR with a merge commit, one change at a time: `gh pr merge <N> --merge --subject "Merge #<N>: <title>"`. Never squash or rebase (both are off on the repository), and pass `--subject`: `gh pr merge` does not make the `Merge #N: <title>` subject by itself.
+<!-- scshafe-dev:end landing -->
