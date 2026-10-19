@@ -22,7 +22,13 @@ command = "go test ./..."
 # (not deployed); stack = its infra stack, host = where it runs (both
 # optional). SERVICE-02: ci.yml never deploys; the lane does.
 [deploy]
-lane = "none"
+lane = "runner"
+stack = "lexinet"
+layout = "app"
+host = "laptop"
+tailnet_node = "lexinet-study"
+door = "none"
+verify_on = "hosted"
 
 [skills]
 # BASE-05 asks for .agents/skills; the catalog is M4. Recorded gap.
@@ -34,8 +40,8 @@ selected = []
 # repository's files, and the ones that existed were left as they are.
 [template]
 source = "scshafe/scshafe-dev"
-version = "0.13.1"
-commit = "51536633d1694dab7a6575c69b77087370af5b33"
+version = "0.14.0"
+commit = "1c3329871cb04f7ea4aedd96175e01c8c3bbda6b"
 released = true
 dirty = false
 mode = "adopted"

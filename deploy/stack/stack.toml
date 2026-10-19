@@ -1,5 +1,3 @@
-# DRAFT (see compose.yaml). Uses keys the current schema has; the native-node
-# keys infra must add are listed in docs/deploy/README.md.
 # The stack's data (stack.toml, schema 1). The host's tools/stack reads it as
 # data, never as shell, and rejects an unknown key; `dev check` (DEPLOY-03)
 # checks the same schema. Secrets are named here and never valued: the owner's
@@ -12,18 +10,26 @@ image = "lexinet"                  # the image built from this repository's Dock
 pin = "LEXINET_IMAGE"
 pin_style = "ref"
 dockerfile = "Dockerfile"
-containers = ["lexinet", "lexinet-db"]
-health = "/healthz"
+containers = ["lexinet"]            # only containers that run the lexinet image
 ready_attempts = 20
 rollback_services = ["lexinet"]
+
+# NATIVE NODE (infra#22, "Native-node stacks"). No sidecar; health is the
+# lexinet container healthcheck plus the node online in the host tailscale status.
+[node]
+mode = "native"
+service = "lexinet"
+hostname = "lexinet-study"
+identity = "state/tsnet"
+enroll = ["/usr/local/bin/lexinet", "tailnet", "enroll", "--state-dir", "/var/lib/lexinet/tsnet", "--hostname", "lexinet-study"]
 
 [check]
 required_health_services = ["lexinet", "db"]
 
 [backup]
-tailscale = false                    # no sidecar; the node identity is state/tsnet
-paths = ["state/tsnet"]             # NATIVE NODE: infra must treat this as the identity
-pg = { container = "lexinet-db", user = "lexinet", db = "lexinet" }                           # app data under state/, e.g. ["state/data"]
+tailscale = true                     # archives the node identity (state/tsnet); not also in paths
+paths = []
+pg = { container = "lexinet-db", user = "lexinet", db = "lexinet" }
 
 [env]
 required = []
