@@ -1,4 +1,4 @@
-# DRAFT stack config (mounted read-only at /etc/lexinet/config.toml).
+# Stack config (mounted read-only at /etc/lexinet/config.toml).
 # The database password comes from the environment through LEXINET_DB_PASSWORD
 # only if lexinet learns to read it; until then the DSN needs the generated
 # secret rendered in by the deploy (open item in docs/deploy/README.md).

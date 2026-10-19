@@ -1,12 +1,9 @@
-# DRAFT, not a live stack: infra's validator (V-06) refuses a stack without a
-# ts-<node> sidecar, so this lives under docs/ where `dev check` does not see
-# it. It becomes deploy/stack/compose.yaml once infra supports a native
-# tsnet node (docs/deploy/README.md, "Native-node requirements").
-# lexinet on the runner lane, WITHOUT a ts-<node> sidecar: the study node is
-# lexinet's own embedded tsnet (ADR 0003), enrolled once with
-# `lexinet tailnet enroll` (docs/deploy/enrollment.md) and bound at
-# ./state/tsnet. Nothing is published on the host; the loopback operator API
-# stays inside the container's own network.
+# lexinet on the runner lane as a NATIVE tailnet node (infra#22): no ts-<node>
+# sidecar, no serve.json. The study node is lexinet's own tsnet (ADR 0003),
+# enrolled once with `lexinet tailnet enroll` (stack.toml [node] enroll;
+# docs/deploy/enrollment.md). ./state/tsnet is the node identity and is bound
+# read-write to the lexinet service only. Nothing is published on the host;
+# the loopback operator API stays inside the container.
 name: lexinet
 
 services:

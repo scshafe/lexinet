@@ -1,13 +1,9 @@
 # Deploying lexinet on the runner lane
 
-Status (2026-10-18): **not deployed.** `dev.toml [deploy] lane = "none"`. The
-runner lane's stack validator assumes a `ts-<node>` Tailscale sidecar, which
-lexinet must not have (ADR 0003: the study listener is lexinet's own native
-`tsnet.ListenTLS`, never behind a proxy or `serve`). `dev check` with a
-sidecar-less `deploy/stack/` fails `V-06` ("exactly one tailscale/tailscale
-service is required") and DEPLOY-05 ("sets no TS_HOSTNAME"). The draft stack is
-in [`draft-stack/`](draft-stack/), outside `deploy/stack/` so `dev check` does
-not see it. Issue #3 tracks the work.
+Status: the stack is in `deploy/stack/` as a native node (`stack.toml [node]`,
+infra#22), with `dev.toml [deploy] lane = "runner"`. It needs the infra
+validator/entrypoint and scshafe-dev support for `[node]`; until both land,
+`dev check` reports DEPLOY-03/04/05 gaps and nothing deploys. Issue #3 tracks it.
 
 - [enrollment.md](enrollment.md): enrolling the `lexinet-study` identity once.
 - [data-migration.md](data-migration.md): moving the frozen stack's database.
