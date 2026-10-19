@@ -22,13 +22,7 @@ command = "go test ./..."
 # (not deployed); stack = its infra stack, host = where it runs (both
 # optional). SERVICE-02: ci.yml never deploys; the lane does.
 [deploy]
-lane = "runner"
-stack = "lexinet"
-layout = "app"
-host = "laptop"
-tailnet_node = "lexinet-study"
-door = "none"
-verify_on = "hosted"
+lane = "none"
 
 [skills]
 # BASE-05 asks for .agents/skills; the catalog is M4. Recorded gap.

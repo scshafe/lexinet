@@ -1,3 +1,5 @@
+# DRAFT (see compose.yaml). Uses keys the current schema has; the native-node
+# keys infra must add are listed in docs/deploy/README.md.
 # The stack's data (stack.toml, schema 1). The host's tools/stack reads it as
 # data, never as shell, and rejects an unknown key; `dev check` (DEPLOY-03)
 # checks the same schema. Secrets are named here and never valued: the owner's
@@ -19,8 +21,9 @@ rollback_services = ["lexinet"]
 required_health_services = ["lexinet", "db"]
 
 [backup]
-tailscale = true                     # the node identity (always, with a sidecar)
-paths = ["state/tsnet"]                           # app data under state/, e.g. ["state/data"]
+tailscale = false                    # no sidecar; the node identity is state/tsnet
+paths = ["state/tsnet"]             # NATIVE NODE: infra must treat this as the identity
+pg = { container = "lexinet-db", user = "lexinet", db = "lexinet" }                           # app data under state/, e.g. ["state/data"]
 
 [env]
 required = []

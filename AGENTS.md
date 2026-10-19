@@ -26,8 +26,11 @@ commands), on Postgres 16 with `pg_trgm`. Public, MIT. A scshafe-dev `service` p
   identity headers. The tsnet state directory is an identity secret.
 - **Production:** not deployed (`[deploy] lane = "none"`). The infra stack
   `stacks/lexinet` (sidecar `serve`, `--tailnet off`) is frozen on `cole-laptop`:
-  restored, not started. Moving lexinet to the runner lane with its native tsnet
-  listener is planned work.
+  restored, not started. The move to the runner lane with the native tsnet
+  listener (no sidecar) waits for infra to support a native node; the
+  requirements, the one-time enrollment (`lexinet tailnet enroll`, key on
+  stdin), the data migration and the draft stack are in `docs/deploy/`
+  (issue #3).
 - **Secrets and data:** never print or commit tokens, tsnet state, `.env` files, or
   database contents. Test tokens in the tree are canaries.
 - **History:** the `study.v1` work (2026-08-16/17) was developed on the Air and
