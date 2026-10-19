@@ -1,13 +1,11 @@
-# Stack config (mounted read-only at /etc/lexinet/config.toml).
-# The database password comes from the environment through LEXINET_DB_PASSWORD
-# only if lexinet learns to read it; until then the DSN needs the generated
-# secret rendered in by the deploy (open item in docs/deploy/README.md).
+# Stack config, baked into the image as /etc/lexinet/stack-config.toml (non-secret).
+# The database password comes from LEXINET_DB_PASSWORD (the stack passes it).
 [service]
 listen_loopback = "127.0.0.1:17892"
 auth_token = ""            # loopback operator bearer: set by provisioning
 tailnet_enabled = true
 tailnet_hostname = "lexinet-study"
-tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+tailnet_state_dir = "/var/lib/lexinet/tsnet"
 
 [service.tailnet_study_authentication]
 mode = "tailnet_node"

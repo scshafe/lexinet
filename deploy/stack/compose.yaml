@@ -1,6 +1,6 @@
 # lexinet on the runner lane as a NATIVE tailnet node (infra#22): no ts-<node>
 # sidecar, no serve.json. The study node is lexinet's own tsnet (ADR 0003),
-# enrolled once with `lexinet tailnet enroll` (stack.toml [node] enroll;
+# enrolled once by `stack enroll` (stack.toml [node] enroll runs `lexinet tailnet enroll`;
 # docs/deploy/enrollment.md). ./state/tsnet is the node identity and is bound
 # read-write to the lexinet service only. Nothing is published on the host;
 # the loopback operator API stays inside the container.
@@ -43,12 +43,12 @@ services:
     mem_limit: 512m
     pids_limit: 256
     environment:
-      LEXINET_CONFIG: /etc/lexinet/config.toml
+      # The config is baked into the image (binds are allowed only under ./state).
+      LEXINET_CONFIG: /etc/lexinet/stack-config.toml
       LEXINET_DB_PASSWORD: ${LEXINET_DB_PASSWORD}
     command: ["serve", "--bind", "127.0.0.1:17892", "--tailnet", "on"]
     volumes:
-      - ./config.toml:/etc/lexinet/config.toml:ro
-      - ./state/tsnet:/var/lib/lexinet/tsnet-state
+      - ./state/tsnet:/var/lib/lexinet/tsnet
     healthcheck:
       test: ["CMD", "/usr/local/bin/lexinet", "--endpoint", "http://127.0.0.1:17892", "ping"]
       interval: 30s

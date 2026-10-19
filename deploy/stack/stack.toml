@@ -10,26 +10,25 @@ image = "lexinet"                  # the image built from this repository's Dock
 pin = "LEXINET_IMAGE"
 pin_style = "ref"
 dockerfile = "Dockerfile"
-containers = ["lexinet", "lexinet-db"]
-health = "/healthz"                  # TODO(infra#22): native nodes check the container healthcheck instead; set per the schema
+containers = ["lexinet"]            # only containers that run the lexinet image
 ready_attempts = 20
 rollback_services = ["lexinet"]
 
-# NATIVE NODE (infra#22). Field names follow the owner's summary of the schema;
-# verify against the comment on infra#22 before opening the PR.
+# NATIVE NODE (infra#22, "Native-node stacks"). No sidecar; health is the
+# lexinet container healthcheck plus the node online in the host tailscale status.
 [node]
 mode = "native"
 service = "lexinet"
 hostname = "lexinet-study"
 identity = "state/tsnet"
-enroll = ["lexinet", "tailnet", "enroll", "--state-dir", "/var/lib/lexinet/tsnet-state", "--hostname", "lexinet-study"]
+enroll = ["/usr/local/bin/lexinet", "tailnet", "enroll", "--state-dir", "/var/lib/lexinet/tsnet", "--hostname", "lexinet-study"]
 
 [check]
 required_health_services = ["lexinet", "db"]
 
 [backup]
-tailscale = false                    # no sidecar; the node identity is state/tsnet
-paths = ["state/tsnet"]              # the node identity (see [node] identity)
+tailscale = true                     # archives the node identity (state/tsnet); not also in paths
+paths = []
 pg = { container = "lexinet-db", user = "lexinet", db = "lexinet" }
 
 [env]

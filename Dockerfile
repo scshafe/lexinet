@@ -13,6 +13,9 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /
 COPY --from=build /out/lexinet /usr/local/bin/lexinet
 
+# The runner-lane stack's non-secret config; selected with LEXINET_CONFIG there.
+COPY deploy/stack/config.toml /etc/lexinet/stack-config.toml
+
 ENV LEXINET_CONFIG=/etc/lexinet/config.toml
 EXPOSE 17892
 USER nonroot:nonroot
