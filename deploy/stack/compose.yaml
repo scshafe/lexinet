@@ -1,42 +1,55 @@
-# Skeleton from scshafe-dev (dev.toml [deploy], DEPLOY-03). The host's
-# tools/stack validates it against an allowlist before anything runs: no
-# privileges, no host namespaces, binds only under ./state, ports only on
-# loopback, images either built here (through the pin) or pinned by digest.
-# `dev check` runs the same validator (DEPLOY-04) and lists what it can see
-# (DEPLOY-05).
+# lexinet on the runner lane, WITHOUT a ts-<node> sidecar: the study node is
+# lexinet's own embedded tsnet (ADR 0003), enrolled once with
+# `lexinet tailnet enroll` (docs/deploy/enrollment.md) and bound at
+# ./state/tsnet. Nothing is published on the host; the loopback operator API
+# stays inside the container's own network.
 name: lexinet
 
 services:
-  ts-lexinet-study:
-    # TODO: pin the digest: docker buildx imagetools inspect tailscale/tailscale:<tag>
-    image: tailscale/tailscale@sha256:0000000000000000000000000000000000000000000000000000000000000000
-    container_name: ts-lexinet-study
+  db:
+    # postgres:16-bookworm (pg_trgm is in contrib), multi-arch index digest
+    image: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    container_name: lexinet-db
     init: true
     restart: unless-stopped
-    dns: [1.1.1.1]
     security_opt: [no-new-privileges:true]
     environment:
-      TS_HOSTNAME: lexinet-study
-      TS_USERSPACE: "true"
-      TS_AUTH_ONCE: "true"
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_SERVE_CONFIG: /config/serve.json
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      POSTGRES_DB: lexinet
+      POSTGRES_USER: lexinet
+      POSTGRES_PASSWORD: ${LEXINET_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
-      - ./state/tailscale:/var/lib/tailscale
-      - ./serve.json:/config/serve.json:ro
+      - ./state/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexinet -d lexinet"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
 
   lexinet:
     image: ${LEXINET_IMAGE}
     container_name: lexinet
     init: true
-    user: "65532:65532"  # not root; the deploy gives each ./state/<sub> it binds to this uid
+    user: "65532:65532"
     restart: unless-stopped
-    network_mode: service:ts-lexinet-study
-    depends_on: [ts-lexinet-study]
+    depends_on:
+      db:
+        condition: service_healthy
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # The app listens on 127.0.0.1:8080 in the sidecar's namespace, which
-    # serve.json proxies to the tailnet. Add a healthcheck and its own state:
-    #   volumes: ["./state/data:/data"]
+    mem_limit: 512m
+    pids_limit: 256
+    environment:
+      LEXINET_CONFIG: /etc/lexinet/config.toml
+      LEXINET_DB_PASSWORD: ${LEXINET_DB_PASSWORD}
+    command: ["serve", "--bind", "127.0.0.1:17892", "--tailnet", "on"]
+    volumes:
+      - ./config.toml:/etc/lexinet/config.toml:ro
+      - ./state/tsnet:/var/lib/lexinet/tsnet-state
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lexinet", "--endpoint", "http://127.0.0.1:17892", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
