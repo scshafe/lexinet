@@ -87,6 +87,9 @@ Tailscale enrollment or control-plane variables. Do not put auth keys, OAuth
 credentials, workload tokens, or other enrollment secrets in Git, config,
 environment variables, command arguments, URLs, logs, or diagnostics.
 
+Enroll the state directory once with `lexinet tailnet enroll --state-dir DIR
+--hostname NAME` (single-use key on stdin only; see `docs/deploy/enrollment.md`).
+
 Choose exactly one Tailnet study authentication mode. Node-capability mode uses
 transport identity only and requires the caller node to have exactly one tag,
 equal to the configured tag. The application capability must use a domain the

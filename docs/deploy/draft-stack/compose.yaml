@@ -1,0 +1,60 @@
+# DRAFT, not a live stack: infra's validator (V-06) refuses a stack without a
+# ts-<node> sidecar, so this lives under docs/ where `dev check` does not see
+# it. It becomes deploy/stack/compose.yaml once infra supports a native
+# tsnet node (docs/deploy/README.md, "Native-node requirements").
+# lexinet on the runner lane, WITHOUT a ts-<node> sidecar: the study node is
+# lexinet's own embedded tsnet (ADR 0003), enrolled once with
+# `lexinet tailnet enroll` (docs/deploy/enrollment.md) and bound at
+# ./state/tsnet. Nothing is published on the host; the loopback operator API
+# stays inside the container's own network.
+name: lexinet
+
+services:
+  db:
+    # postgres:16-bookworm (pg_trgm is in contrib), multi-arch index digest
+    image: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    container_name: lexinet-db
+    init: true
+    user: "999:999"  # the image's postgres uid; the deploy gives ./state/db to it (V-10)
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    environment:
+      POSTGRES_DB: lexinet
+      POSTGRES_USER: lexinet
+      POSTGRES_PASSWORD: ${LEXINET_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - ./state/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexinet -d lexinet"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  lexinet:
+    image: ${LEXINET_IMAGE}
+    container_name: lexinet
+    init: true
+    user: "65532:65532"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 256
+    environment:
+      LEXINET_CONFIG: /etc/lexinet/config.toml
+      LEXINET_DB_PASSWORD: ${LEXINET_DB_PASSWORD}
+    command: ["serve", "--bind", "127.0.0.1:17892", "--tailnet", "on"]
+    volumes:
+      - ./config.toml:/etc/lexinet/config.toml:ro
+      - ./state/tsnet:/var/lib/lexinet/tsnet-state
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lexinet", "--endpoint", "http://127.0.0.1:17892", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

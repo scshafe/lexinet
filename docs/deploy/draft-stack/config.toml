@@ -1,0 +1,19 @@
+# DRAFT stack config (mounted read-only at /etc/lexinet/config.toml).
+# The database password comes from the environment through LEXINET_DB_PASSWORD
+# only if lexinet learns to read it; until then the DSN needs the generated
+# secret rendered in by the deploy (open item in docs/deploy/README.md).
+[service]
+listen_loopback = "127.0.0.1:17892"
+auth_token = ""            # loopback operator bearer: set by provisioning
+tailnet_enabled = true
+tailnet_hostname = "lexinet-study"
+tailnet_state_dir = "/var/lib/lexinet/tsnet-state"
+
+[service.tailnet_study_authentication]
+mode = "tailnet_node"
+required_node_tag = "tag:house-panel"
+application_capability = "scshafe.github.io/cap/lexinet-study-v1"
+allowed_profile_refs = ["cole"]
+
+[service.database]
+dsn = "postgres://lexinet@db:5432/lexinet?sslmode=disable"

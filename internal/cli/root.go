@@ -90,6 +90,7 @@ func NewRoot(opts *Options) *cobra.Command {
 		newSearchCommand(opts),
 		newServeCommand(opts, productionServeCommandRuntime()),
 		newMigrateCommand(opts),
+		newTailnetCommand(opts),
 		newPingCommand(opts),
 		newVersionCommand(opts),
 		newConfigCommand(opts),
