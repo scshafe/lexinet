@@ -1,9 +1,9 @@
 # Deploying lexinet on the runner lane
 
-Status: the stack is in `deploy/stack/` as a native node (`stack.toml [node]`,
-infra#22), with `dev.toml [deploy] lane = "runner"`. It needs the infra
-validator/entrypoint and scshafe-dev support for `[node]`; until both land,
-`dev check` reports DEPLOY-03/04/05 gaps and nothing deploys. Issue #3 tracks it.
+Status (2026-10-19): **live.** The stack is in `deploy/stack/` as a native
+node (`stack.toml [node]`, infra#22/#23) with `dev.toml [deploy] lane =
+"runner"`; the data was migrated and the nightly backup (node identity plus pg
+dump) runs. The ADR 0003 release-gate evidence is still to be recorded.
 
 - [enrollment.md](enrollment.md): enrolling the `lexinet-study` identity once.
 - [data-migration.md](data-migration.md): moving the frozen stack's database.
