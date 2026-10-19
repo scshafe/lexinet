@@ -60,6 +60,11 @@ tailnet_state_dir = "~/.config/lexinet/tsnet-state"
 dsn = "postgres://lexinet@127.0.0.1:5432/lexinet?sslmode=disable"
 ```
 
+The database password can be kept out of the config file: set
+`LEXINET_DB_PASSWORD` (or `LEXINET_DB_PASSWORD_FILE`, an owner-only file) and
+`serve`/`migrate` add it to a DSN that has a user and no password. It is never
+written back to the config.
+
 The built-in service default is loopback-only with `tailnet_enabled = false`, so
 local development may leave `service.auth_token` empty for legacy routes.
 Loopback `study.v1` still fails closed until that token is configured. The token
