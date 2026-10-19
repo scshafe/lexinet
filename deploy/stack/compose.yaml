@@ -1,0 +1,42 @@
+# Skeleton from scshafe-dev (dev.toml [deploy], DEPLOY-03). The host's
+# tools/stack validates it against an allowlist before anything runs: no
+# privileges, no host namespaces, binds only under ./state, ports only on
+# loopback, images either built here (through the pin) or pinned by digest.
+# `dev check` runs the same validator (DEPLOY-04) and lists what it can see
+# (DEPLOY-05).
+name: lexinet
+
+services:
+  ts-lexinet-study:
+    # TODO: pin the digest: docker buildx imagetools inspect tailscale/tailscale:<tag>
+    image: tailscale/tailscale@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: ts-lexinet-study
+    init: true
+    restart: unless-stopped
+    dns: [1.1.1.1]
+    security_opt: [no-new-privileges:true]
+    environment:
+      TS_HOSTNAME: lexinet-study
+      TS_USERSPACE: "true"
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+    volumes:
+      - ./state/tailscale:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+
+  lexinet:
+    image: ${LEXINET_IMAGE}
+    container_name: lexinet
+    init: true
+    user: "65532:65532"  # not root; the deploy gives each ./state/<sub> it binds to this uid
+    restart: unless-stopped
+    network_mode: service:ts-lexinet-study
+    depends_on: [ts-lexinet-study]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # The app listens on 127.0.0.1:8080 in the sidecar's namespace, which
+    # serve.json proxies to the tailnet. Add a healthcheck and its own state:
+    #   volumes: ["./state/data:/data"]

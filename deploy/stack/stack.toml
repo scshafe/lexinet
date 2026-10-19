@@ -1,0 +1,28 @@
+# The stack's data (stack.toml, schema 1). The host's tools/stack reads it as
+# data, never as shell, and rejects an unknown key; `dev check` (DEPLOY-03)
+# checks the same schema. Secrets are named here and never valued: the owner's
+# provisioning places them on the host. Infra's stacks/lexinet/host.conf
+# grants what this file cannot (host paths, loopback ports, groups).
+schema = 1
+
+[deploy]
+image = "lexinet"                  # the image built from this repository's Dockerfile
+pin = "LEXINET_IMAGE"                      # the .env variable stack deploy writes (name:tag)
+pin_style = "ref"
+dockerfile = "Dockerfile"
+containers = ["lexinet"]           # all must be ready on the candidate
+health = "/healthz"                  # probed through the tailnet name
+ready_attempts = 20
+rollback_services = ["lexinet"]
+
+[check]
+required_health_services = ["lexinet"]
+
+[backup]
+tailscale = true                     # the node identity (always, with a sidecar)
+paths = []                           # app data under state/, e.g. ["state/data"]
+
+[env]
+required = ["TS_AUTHKEY"]
+generated = []
+owner = []
