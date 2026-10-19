@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"lexinet/internal/config"
@@ -163,5 +166,41 @@ func TestServePreparesCompleteTailnetPolicyBeforeMigrationAndReusesAuthority(t *
 	}
 	if got := cfg.Service.TailnetStudyAuthentication.AllowedProfileRefs[0]; got != "learner.primary" {
 		t.Fatalf("source config profile mutated: %q", got)
+	}
+}
+
+func TestServeAndMigrateApplyDatabasePasswordFromEnvironment(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	body := "[service.database]\ndsn = \"postgres://lexinet@db:5432/lexinet\"\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.DefaultConfigEnv, configPath)
+	t.Setenv(config.DatabasePasswordEnv, "s3cret")
+
+	var migratedWith string
+	cmd := newServeCommand(&Options{}, serveCommandRuntime{
+		migrate: func(_ context.Context, dsn string) error { migratedWith = dsn; return nil },
+		prepare: func(got server.Config) (*server.PreparedConfiguration, error) {
+			if got.DatabaseDSN != "postgres://lexinet:s3cret@db:5432/lexinet" {
+				t.Fatalf("prepared DSN does not carry the password")
+			}
+			return &server.PreparedConfiguration{}, nil
+		},
+		serve: func(context.Context, *server.PreparedConfiguration) error { return nil },
+	})
+	cmd.SetArgs([]string{"--tailnet", "off"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if migratedWith != "postgres://lexinet:s3cret@db:5432/lexinet" {
+		t.Fatal("migrate did not receive the password")
+	}
+	// The file on disk must not gain the password.
+	after, _ := os.ReadFile(configPath)
+	if strings.Contains(string(after), "s3cret") {
+		t.Fatal("password written to config")
 	}
 }

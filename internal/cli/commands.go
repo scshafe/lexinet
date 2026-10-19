@@ -78,9 +78,11 @@ func newMigrateCommand(opts *Options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dsn := cfg.Service.Database.DSN
-			if db != "" {
-				dsn = db
+			dsn := db
+			if dsn == "" {
+				if dsn, err = cfg.DatabaseDSN(); err != nil {
+					return &ExitError{Code: ExitValidation, Err: err}
+				}
 			}
 			if err := storage.Migrate(cmd.Context(), dsn); err != nil {
 				return err
@@ -129,6 +131,8 @@ func newServeCommand(opts *Options, runtime serveCommandRuntime) *cobra.Command 
 			}
 			if db != "" {
 				cfg.Service.Database.DSN = db
+			} else if cfg.Service.Database.DSN, err = cfg.DatabaseDSN(); err != nil {
+				return &ExitError{Code: ExitValidation, Err: err}
 			}
 			if bind != "" {
 				cfg.Service.ListenLoopback = bind
