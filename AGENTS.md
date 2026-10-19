@@ -24,13 +24,14 @@ commands), on Postgres 16 with `pg_trgm`. Public, MIT. A scshafe-dev `service` p
   study create/resume and sync, with a fresh `WhoIs` per request
   (`docs/decisions/0003`). Never put that listener behind a proxy or trust forwarded
   identity headers. The tsnet state directory is an identity secret.
-- **Production:** not deployed (`[deploy] lane = "none"`). The infra stack
-  `stacks/lexinet` (sidecar `serve`, `--tailnet off`) is frozen on `cole-laptop`:
-  restored, not started. The move to the runner lane with the native tsnet
-  listener (no sidecar) waits for infra to support a native node; the
-  requirements, the one-time enrollment (`lexinet tailnet enroll`, key on
-  stdin), the data migration and the draft stack are in `docs/deploy/`
-  (issue #3).
+- **Production:** live since 2026-10-19 on `cole-laptop` through the runner lane
+  (`[deploy] lane = "runner"`, `deploy/stack/`, a native tsnet node
+  `lexinet-study` with no sidecar; infra `stacks/lexinet/host.conf`). Every merge
+  to `main` deploys: watch the `deploy` run (`gh run watch`). The loopback API
+  is not reachable from the tailnet. Enrollment, the data migration and the
+  host requirements are in `docs/deploy/`. Open: the ADR 0003 release-gate
+  evidence (`docs/validation/study-tailnet-release-gate.md`) waits for the
+  panel node (embedded-house-panel#21).
 - **Secrets and data:** never print or commit tokens, tsnet state, `.env` files, or
   database contents. Test tokens in the tree are canaries.
 - **History:** the `study.v1` work (2026-08-16/17) was developed on the Air and
