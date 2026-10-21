@@ -2,7 +2,7 @@
 
 lexinet is an idea-centric technical lexicon network. The root object is an idea, not a word: canonical names, acronyms, aliases, deprecated names, and localized names all resolve to one concept. Definitions, examples, notes, typed relationships, and search attach to that idea.
 
-The project ships as one Go 1.26.5 binary named `lexinet` (with the native
+The project ships as one Go 1.26.10 binary named `lexinet` (with the native
 Tailnet integration pinned to Tailscale v1.102.2):
 
 - `lexinet serve` runs the chi HTTP service on `127.0.0.1:17892` by default.
