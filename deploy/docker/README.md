@@ -1,6 +1,6 @@
 # lexinet Docker Deploy
 
-This directory contains one multi-stage Go 1.26.5 image for the single `lexinet`
+This directory contains one multi-stage Go 1.26.10 image for the single `lexinet`
 binary plus a Compose stack for the HTTP service and its Postgres database. The
 binary pins Tailscale v1.102.2 for its optional embedded-node transport.
 
