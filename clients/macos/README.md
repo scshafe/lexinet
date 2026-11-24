@@ -123,10 +123,10 @@ The popover footer shows the checkout's short commit hash and a `Check for Updat
 Manual update (same code path as the button):
 
 ```sh
-cd ~/lexinet && git pull --ff-only && ./clients/macos/update.sh
+cd ~/Projects/lexinet && git pull --ff-only && ./clients/macos/update.sh
 ```
 
-Repository discovery walks up from the executable path, which covers running out of a clone's `.build` tree. If the binary was copied elsewhere (e.g. `~/Applications`), point the app at the clone with `defaults write dev.lexinet.menubar repoPath ~/lexinet` or the `LEXINET_REPO_PATH` environment variable. A LaunchAgent with a different label is supported via `LEXINET_LAUNCHAGENT_LABEL`.
+Repository discovery walks up from the executable path, which covers running out of a clone's `.build` tree. If the binary was copied elsewhere (e.g. `~/Applications`), point the app at the clone with `defaults write dev.lexinet.menubar repoPath ~/Projects/lexinet` or the `LEXINET_REPO_PATH` environment variable. A LaunchAgent with a different label is supported via `LEXINET_LAUNCHAGENT_LABEL`.
 
 Notes:
 
